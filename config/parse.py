@@ -121,7 +121,7 @@ def int_or_prefixed_size(val):
 
 def core_default_names(cpu):
     """ Apply defaults to a cpu with the given index """
-    default_element_names = {n: f'{cpu["name"]}_{n}' for n in ('L1I', 'L1D', 'ITLB', 'DTLB', 'L2C', 'STLB', 'PTW')}
+    default_element_names = {n: f'{cpu["name"]}_{n}' for n in ('L1I', 'L1D', 'ITLB', 'DTLB', 'L2C', 'STLB', 'PTW', 'PWC')}
     default_core = {
         'frequency' : 4000,
         'DIB': {},
@@ -182,6 +182,9 @@ def do_deprecation(element, deprecation_map, warning_msg_map={}):
     return retval
 
 def path_end_in(path, end_name, key='lower_level'):
+    # print(deque(path, maxlen=1)[0]['name'])
+    # print(key)
+    # print(end_name)
     return {'name': deque(path, maxlen=1)[0]['name'], key: end_name}
 
 def extract_element(key, *parents):
@@ -344,16 +347,17 @@ class NormalizedConfiguration:
 
         # Give cores numeric indices and default cache names
         cores = [{'_index': i, **core_default_names(cpu)} for i,cpu in enumerate(self.cores)]
-
+        #print('cores',cores)
         path_root_names = tuple(tuple(cpu[name] for cpu in cores) for name in ('L1I', 'L1D', 'ITLB', 'DTLB'))
-
+        #print('path_root_names',path_root_names)
         # Instantiate any missing default caches
         caches = util.combine_named(self.caches.values(), ({ 'name': 'LLC' },), *map(defaults.cache_core_defaults, cores))
+        #print('caches',caches)
         ptws = util.combine_named(self.ptws.values(), *map(defaults.ptw_core_defaults, cores))
-
+        #print('ptws',ptws)
         # Remove caches that are inaccessible
         caches = filter_inaccessible(caches, itertools.chain(*path_root_names))
-
+        #print('caches 2', caches)
         # Follow paths and apply default sizings
         caches = util.combine_named(caches.values(), defaults.list_defaults(cores, caches))
 
@@ -367,7 +371,9 @@ class NormalizedConfiguration:
             }
 
         tlb_path = itertools.chain(*(util.iter_system(caches, name) for name in itertools.chain(*path_root_names[2:])))
+        #print(*tlb_path)
         data_path = itertools.chain(*(util.iter_system(caches, name) for name in itertools.chain(*path_root_names[:2])))
+        #print(*data_path)
         caches = util.combine_named(
             # Set prefetcher_activate
             ({ 'name': k,
@@ -474,7 +480,7 @@ def parse_config(*configs, module_dir=None, branch_dir=None, btb_dir=None, pref_
         lhs.merge(rhs)
         return lhs
     merged_config = functools.reduce(do_merge, (NormalizedConfiguration(c, verbose=verbose) for c in configs))
-
+    
     contexts = dict(
         branch_context = modules.ModuleSearchContext(list_dirs('branch', branch_dir or []), verbose=verbose),
         btb_context = modules.ModuleSearchContext(list_dirs('btb', btb_dir or []), verbose=verbose),

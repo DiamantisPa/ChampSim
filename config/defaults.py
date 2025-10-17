@@ -22,12 +22,13 @@ def cache_core_defaults(cpu):
     yield { 'name': cpu.get('L1D'), 'lower_level': cpu.get('L2C') }
     yield { 'name': cpu.get('ITLB'), 'lower_level': cpu.get('STLB') }
     yield { 'name': cpu.get('DTLB'), 'lower_level': cpu.get('STLB') }
+    yield { 'name': cpu.get('PWC'), 'lower_level': cpu.get('L2C') }
     yield { 'name': cpu.get('L2C'), 'lower_level': 'LLC' }
     yield { 'name': cpu.get('STLB'), 'lower_level': cpu.get('PTW') }
 
 def ptw_core_defaults(cpu):
     ''' Generate the lower levels that a default core would expect for each of its PTWs '''
-    yield { 'name': cpu.get('PTW'), 'lower_level': cpu.get('L1D') }
+    yield { 'name': cpu.get('PTW'), 'lower_level': cpu.get('PWC') }
 
 def list_defaults_for_core(cpu, caches):
     ''' Generate the down-path defaults that a default core would expect '''
@@ -88,4 +89,5 @@ def roundrobin(*paths):
 def list_defaults(cores, caches):
     ''' Generate the down-path defaults for all cores, merging with priority towards lower levels '''
     paths = itertools.chain(*(list_defaults_for_core(cpu, caches) for cpu in cores))
+    #print(paths)
     yield from util.combine_named(reversed(list(roundrobin(*paths)))).values()

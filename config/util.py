@@ -31,6 +31,8 @@ def iter_system(system, name, key='lower_level'):
     :param key: the key that points to the next element
     '''
     hoisted = {**system}
+    # print(name)
+    # print(hoisted)
     while name in hoisted:
         val = hoisted.pop(name)
         yield val
@@ -91,11 +93,15 @@ def subdict(whole_dict, keys, invert=False):
     return {k:v for k,v in whole_dict.items() if (k in keys) != invert}
 
 def combine_named(*iterables):
+    #print("combine_named")
     '''
     Collect a sequence of sequences of dictionaries by their 'name' parameter.
     Earlier parameters have priority over later parameters.
     '''
     key_func = operator.methodcaller('get', 'name', '')
+    # for d in collect(itertools.chain(*iterables), key_func, star(chain)):
+    #     print(key_func(d))
+    #     print(d)
     items = ((key_func(d), d) for d in collect(itertools.chain(*iterables), key_func, star(chain)))
     return dict(filter(operator.itemgetter(0), items))
 

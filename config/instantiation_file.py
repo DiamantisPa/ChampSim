@@ -318,6 +318,8 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, build_id):
     '''
     classname = f'champsim::configured::generated_environment<0x{build_id}>'
     ul_pairs = get_upper_levels(cores, caches, ptws)
+    print('ul_pairs', ul_pairs)
+    print('decorate_queues', decorate_queues(caches, ptws, pmem))
     queues = get_queue_info(ul_pairs, decorate_queues(caches, ptws, pmem))
 
     datas = itertools.filterfalse(operator.methodcaller('get', 'legacy', False), itertools.chain(
@@ -330,7 +332,7 @@ def get_instantiation_lines(cores, caches, ptws, pmem, vmem, build_id):
 
     # Get fastest clock period in picoseconds
     global_clock_period = int(1000000/max(x['frequency'] for x in itertools.chain(cores, caches, ptws, (pmem,))))
-
+    print('queues', queues)
     channels_head, channels_tail = util.cut((f'champsim::channel{{{queue_fmtstr.format(**v)}}}' for v in queues), n=-1)
     channel_instantiation_body = ('channels{', *(v+',' for v in channels_head), *channels_tail, '},')
 
