@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <numeric>
+#include <iostream>
 #include <fmt/chrono.h>
 #include <fmt/core.h>
 #include <fmt/ranges.h>
@@ -153,13 +154,47 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
 
   // handle branch prediction for all instructions as at this point we do not know if the instruction is a branch
   sim_stats.total_branch_types.increment(arch_instr.branch);
+  //std::cout << "is branch " << arch_instr.branch << std::endl;
   auto [predicted_branch_target, always_taken] = impl_btb_prediction(arch_instr.ip, arch_instr.branch);
+  //std::cout << "btb target " << predicted_branch_target << std::endl;
+  //std::cout << "always taken " << always_taken << std::endl;
   arch_instr.branch_prediction = impl_predict_branch(arch_instr.ip, predicted_branch_target, always_taken, arch_instr.branch) || always_taken;
+  //std::cout << "branch prediction " << arch_instr.branch_prediction << std::endl;
+  
+  // Extract the operands (source registers)
+  uint64_t src1 = arch_instr.source_registers.empty() ? 0 : arch_instr.source_registers[0];  // Operand 1
+  uint64_t src2 = arch_instr.source_registers.size() < 2 ? 0 : arch_instr.source_registers[1];  // Operand 2 (second operand)
+  // Calculate the failure rate for the regular predictor
+  float failure_rate = 0.0;
+  if (regular_predictor_total[arch_instr.ip.to<uint64_t>()] > 0) {
+    failure_rate = (float) regular_predictor_misps[arch_instr.ip.to<uint64_t>()] / (float) regular_predictor_total[arch_instr.ip.to<uint64_t>()];
+  }
+  // Threshold for enabling ghost predictor
+  float threshold = 0.4f;  // 10% mis-prediction rate
+  bool ghost_predictor_enabled = failure_rate > threshold;
+  // Ghost Predictor: Predict using the fingerprint if enabled
+  bool ghost_prediction = false;
+  bool ghost_hit = false;
+  if (ghost_predictor_enabled) {
+    //std::cout << "Ghost predictor enabled." << std::endl;
+    ghost_hit = ghost_predictor.predict(arch_instr.ip.to<uint64_t>(), src1, src2, ghost_prediction);
+    if (ghost_hit) {
+      //std::cout << "Ghost predictor hit, using ghost prediction." << std::endl;
+      arch_instr.branch_prediction = ghost_prediction;
+    }
+  }
+
+  if (!ghost_hit) {
+    regular_predictor_total[arch_instr.ip.to<uint64_t>()]++;
+  }
+
   if (!arch_instr.branch_prediction) {
+    //std::cout << "fall through" << std::endl;
     predicted_branch_target = champsim::address{};
   }
 
   if (arch_instr.is_branch) {
+    //fmt::print("[BRANCH] instr_id: {} ip: {} taken: {}\n", arch_instr.instr_id, arch_instr.ip, arch_instr.branch_taken);
     if constexpr (champsim::debug_print) {
       fmt::print("[BRANCH] instr_id: {} ip: {} taken: {}\n", arch_instr.instr_id, arch_instr.ip, arch_instr.branch_taken);
     }
@@ -176,17 +211,84 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
         fetch_resume_time = champsim::chrono::clock::time_point::max();
         stop_fetch = true;
         arch_instr.branch_mispredicted = true;
+        if (!ghost_hit) {
+          regular_predictor_misps[arch_instr.ip.to<uint64_t>()]++;
+        }
       }
     } else {
+      if (!warmup && !ghost_hit) {
+        regular_predictor_misps[arch_instr.ip.to<uint64_t>()]--;
+      }
       stop_fetch = arch_instr.branch_taken; // if correctly predicted taken, then we can't fetch anymore instructions this cycle
     }
 
     impl_update_btb(arch_instr.ip, arch_instr.branch_target, arch_instr.branch_taken, arch_instr.branch);
     impl_last_branch_result(arch_instr.ip, arch_instr.branch_target, arch_instr.branch_taken, arch_instr.branch);
+    // Update the ghost predictor only if it's enabled and used
+    if (ghost_predictor_enabled) {
+      // If ghost predictor was used, update it with the ghost prediction result
+      ghost_predictor.update(arch_instr.ip.to<uint64_t>(), src1, src2, arch_instr.branch_taken);
+    }
   }
 
   return stop_fetch;
 }
+
+// bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
+// {
+//     bool stop_fetch = false;
+
+//     // Handle branch prediction for all instructions as at this point we do not know if the instruction is a branch
+//     sim_stats.total_branch_types.increment(arch_instr.branch);
+//     std::cout << arch_instr.branch << std::endl;
+//     auto [predicted_branch_target, always_taken] = impl_btb_prediction(arch_instr.ip, arch_instr.branch);
+//     std::cout << "BTB result" << std::endl;
+//     std::cout << "predicted_branch_target " << std::hex << predicted_branch_target << std::endl;
+//     std::cout << "always_taken " << std::hex << always_taken << std::endl;
+//     arch_instr.branch_prediction = impl_predict_branch(arch_instr.ip, predicted_branch_target, always_taken, arch_instr.branch) || always_taken;
+//     std::cout << "branch prediction arch_instr.branch_prediction" << std::hex << arch_instr.branch_prediction << std::endl;
+//     // Check if it's a conditional branch
+//     if (arch_instr.branch == BRANCH_CONDITIONAL) {
+//         std::cout << "condtional branch"  << std::endl;
+//         // Extract the operands (source registers)
+//         uint64_t src1 = arch_instr.source_registers.empty() ? 0 : arch_instr.source_registers[0];  // Operand 1
+//         uint64_t src2 = arch_instr.source_registers.size() < 2 ? 0 : arch_instr.source_registers[1];  // Operand 2 (second operand)
+
+//         // Ghost Predictor: Predict using the fingerprint
+//         bool ghost_prediction = false;
+//         bool ghost_hit = ghost_predictor.predict(arch_instr.ip.to<uint64_t>(), src1, src2, ghost_prediction);
+//         std::cout << "ghost_hit "  << ghost_hit << std::endl;
+//         // If ghost hit, use the prediction from the Ghost Predictor
+//         if (ghost_hit) {
+//             arch_instr.branch_prediction = ghost_prediction;
+//         } else {
+//             // If ghost miss, fallback to the normal perceptron or other global predictor
+//             arch_instr.branch_prediction = arch_instr.branch_prediction || always_taken;
+//         }
+
+//         // After branch resolution, update the Ghost Predictor with the correct outcome
+//         ghost_predictor.update(arch_instr.ip.to<uint64_t>(), src1, src2, arch_instr.branch_taken);
+
+//         // Misprediction check
+//         if (arch_instr.branch_prediction != arch_instr.branch_taken) {
+//             sim_stats.total_rob_occupancy_at_branch_mispredict += std::size(ROB);
+//             sim_stats.branch_type_misses.increment(arch_instr.branch);
+//             if (!warmup) {
+//                 fetch_resume_time = champsim::chrono::clock::time_point::max();
+//                 stop_fetch = true;
+//                 arch_instr.branch_mispredicted = true;
+//             }
+//         } else {
+//             stop_fetch = arch_instr.branch_taken;  // If correctly predicted taken, stop fetching
+//         }
+
+//         // Update the Branch Target Buffer (BTB)
+//         impl_update_btb(arch_instr.ip, arch_instr.branch_target, arch_instr.branch_taken, arch_instr.branch);
+//         impl_last_branch_result(arch_instr.ip, arch_instr.branch_target, arch_instr.branch_taken, arch_instr.branch);
+//     }
+
+//     return stop_fetch;
+// }
 
 bool O3_CPU::do_init_instruction(ooo_model_instr& arch_instr)
 {

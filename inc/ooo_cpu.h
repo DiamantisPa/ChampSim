@@ -44,6 +44,7 @@
 #include "register_allocator.h"
 #include "util/lru_table.h"
 #include "util/to_underlying.h"
+#include "../branch/value_ghost_predictor/value_ghost_predictor.h"
 
 class CACHE;
 class CacheBus
@@ -144,6 +145,9 @@ public:
 
   CacheBus L1I_bus, L1D_bus;
   CACHE* l1i;
+  GhostBranchPredictor ghost_predictor;  // Ghost predictor instance
+  std::map<uint64_t, int> regular_predictor_misps;  // Track mis-predictions for each instruction pointer
+  std::map<uint64_t, int> regular_predictor_total;  // Track total predictions for each instruction pointer
 
   void initialize() final;
   long operate() final;
