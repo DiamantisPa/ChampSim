@@ -1,67 +1,91 @@
 #include "value_ghost_predictor.h"
 
-bool GhostBranchPredictor::predict(uint64_t pc, uint64_t src1, uint64_t src2, bool& prediction) {
-    uint8_t fingerprint = (src1 ^ src2) & 0xFF;  // 8-bit fingerprint (low 8 bits of XOR)
-
-    // Look up the PC's ghost buffer
-    auto& buffer = ghostTable[pc];
-
-    for (auto& entry : buffer) {
-        if (entry.tag == fingerprint) {
-            // Ghost hit, return the predicted outcome
-            prediction = entry.outcome;
-            return true;  // Found a match
-        }
-    }
-
-    // Ghost miss: fall back to perceptron or global predictor
-    return false;  // Miss
+// --- Implementation ---
+GhostBranchPredictor::GhostBranchPredictor() {
+    table.resize(GHOST_TABLE_ENTRIES);
 }
 
-void GhostBranchPredictor::update(uint64_t pc, uint64_t src1, uint64_t src2, bool actualOutcome) {
-    uint8_t fingerprint = (src1 ^ src2) & 0xFF;
+bool GhostBranchPredictor::predict(uint64_t pc, uint64_t val1, uint64_t val2, bool &prediction) {
+    uint32_t bucket_idx = pc_to_bucket(pc);
+    uint32_t tag = make_fingerprint(val1, val2);
+    GhostBucket &b = table[bucket_idx];
 
-    auto& buffer = ghostTable[pc];
+    int idx = find_in_bucket(b, tag);
+    if (idx < 0) return false; // miss
 
-    // Search for the entry to update
-    for (auto& entry : buffer) {
-        if (entry.tag == fingerprint) {
-            // Update the outcome and refresh the age
-            entry.outcome = actualOutcome;
-            entry.age = 0;  // Most recently used
-            // LRU Update: Increment the age for other entries
-            for (auto& other : buffer) {
-                if (&other != &entry && other.age < 3) {
-                    other.age++;
-                }
+    GhostEntry &e = b.entries[idx];
+
+    // Only use ghost prediction if confidence is high enough
+    if (e.confidence >= CONF_THRESHOLD) {
+        prediction = (e.outcome != 0);
+        ghost_total_uses++;
+        // update recency
+        touch_entry(b, idx);
+        return true;
+    }
+    return false;
+}
+
+// New signature: added `used_ghost`
+void GhostBranchPredictor::update(uint64_t pc, uint64_t val1, uint64_t val2, bool actualOutcome, bool reg_mispred, bool used_ghost) {
+    uint32_t bucket_idx = pc_to_bucket(pc);
+    uint32_t tag = make_fingerprint(val1, val2);
+    GhostBucket &b = table[bucket_idx];
+
+    int idx = find_in_bucket(b, tag);
+    if (idx >= 0) {
+        GhostEntry &e = b.entries[idx];
+        bool match = ((e.outcome != 0) == actualOutcome);
+
+        if (used_ghost) {
+            // Strong update: ghost *made* the prediction, so reward/punish more aggressively
+            if (match) {
+                // correct override -> stronger reward
+                unsigned add = 2;
+                unsigned newc = std::min<unsigned>(CONF_MAX, e.confidence + add);
+                e.confidence = static_cast<uint8_t>(newc);
+                ghost_correct++;
+            } else {
+                // wrong override -> stronger penalty
+                if (e.confidence <= 2) e.confidence = 0;
+                else e.confidence = static_cast<uint8_t>(e.confidence - 2);
+                ghost_wrong++;
             }
+            e.outcome = actualOutcome ? 1 : 0;
+            touch_entry(b, idx);
+            return;
+        } else {
+            // Ghost entry existed but wasn't used: soft adaptation
+            if (match) {
+                if (e.confidence < CONF_MAX) e.confidence++;
+                ghost_correct++;
+            } else {
+                if (e.confidence > 0) e.confidence--;
+                ghost_wrong++;
+            }
+            e.outcome = actualOutcome ? 1 : 0;
+            touch_entry(b, idx);
             return;
         }
     }
 
-    // If miss and the predictor was wrong, allocate a new ghost entry
-    if (buffer.size() < GHOST_BUFFER_SIZE) {
-        buffer.push_back({fingerprint, actualOutcome, 0});
-    } else {
-        // Evict the LRU (least recently used) entry
-        int lruIndex = 0;
-        for (int i = 1; i < (int) buffer.size(); ++i) {
-            if (buffer[i].age > buffer[lruIndex].age) {
-                lruIndex = i;
-            }
-        }
+    // Entry not found:
+    // Conservative allocation policy:
+    // - allocate ONLY when regular predictor mispredicted (reg_mispred == true)
+    // - and only when ghost wasn't claimed to be used (used_ghost should be false here normally)
+    // (If used_ghost==true and entry not found, something is inconsistent; do nothing.)
+    if (!reg_mispred || used_ghost) return;
 
-        // Replace LRU entry
-        buffer[lruIndex] = {fingerprint, actualOutcome, 0};
+    int repl = choose_lru(b);
+    b.valid[repl] = true;
+    b.entries[repl].tag = tag;
+    b.entries[repl].outcome = actualOutcome ? 1 : 0;
+    b.entries[repl].confidence = 1; // start low
+    b.entries[repl].age = 0;
+    // increment age of others
+    for (int i = 0; i < (int)GHOST_BUCKET_SIZE; ++i) {
+        if (i != repl && b.valid[i] && b.entries[i].age < 0xFE) b.entries[i].age++;
     }
-
-    // LRU Update: Increment the age for all other entries
-    for (auto& entry : buffer) {
-        if (entry.age < 3) {
-            entry.age++;
-        }
-    }
+    ghost_allocs++;
 }
-
-GhostBranchPredictor::GhostBranchPredictor() {}
 
