@@ -60,6 +60,11 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               total_branch,
                               total_mispredictions));
 
+  lines.push_back(fmt::format("{} Total ghost predictions: {} Total ghost overrides: {} Total ghost correct predictions: {}", stats.name,
+                              stats.ghost_enabled,
+                              stats.ghost_overrides,
+                              stats.ghost_correct));
+
   lines.emplace_back("Branch type MPKI");
   for (auto idx : types) {
     lines.push_back(fmt::format("{}: {}", branch_type_names.at(champsim::to_underlying(idx)),

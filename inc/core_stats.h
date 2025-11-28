@@ -15,6 +15,10 @@ struct cpu_stats {
   long long end_cycles = 0;
   uint64_t total_rob_occupancy_at_branch_mispredict = 0;
 
+  uint64_t  ghost_enabled = 0;
+  uint64_t  ghost_overrides = 0;
+  uint64_t  ghost_correct = 0;
+
   champsim::stats::event_counter<branch_type> total_branch_types = {};
   champsim::stats::event_counter<branch_type> branch_type_misses = {};
 

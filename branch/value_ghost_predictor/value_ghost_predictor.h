@@ -22,11 +22,11 @@
 // --- Tunable constants ---
 static constexpr size_t GHOST_TABLE_ENTRIES = 1 << 16; // 65536 buckets
 static constexpr size_t GHOST_BUCKET_SIZE   = 4;       // entries per bucket
-static constexpr unsigned FINGERPRINT_BITS  = 16;      // fingerprint size (bits)
+static constexpr unsigned FINGERPRINT_BITS  = 24;      // fingerprint size (bits)
 static constexpr unsigned CONF_MAX          = 3;       // 2-bit/3-bit saturating counter
 static constexpr unsigned CONF_THRESHOLD    = 2;       // require confidence >= 2 to override
 static constexpr unsigned MIN_SAMPLES       = 50;      // require at least N samples to enable ghost
-static constexpr float    MISRATE_THRESHOLD = 0.15f;   // ghost candidate when regular misrate > 15%
+static constexpr float    MISRATE_THRESHOLD = 0.25f;   // ghost candidate when regular misrate > 15%
 
 // --- Simple helpers ---
 static inline uint32_t pc_to_bucket(uint64_t pc) {

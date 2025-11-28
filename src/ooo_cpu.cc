@@ -206,11 +206,13 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
     bool used_ghost = false;
 
     if (ghost_predictor_enabled && have_vals) {
+        sim_stats.ghost_enabled++;
         ghost_hit = ghost_predictor.predict(pc_u64, val1, val2, ghost_prediction);
         if (ghost_hit) {
             // The ghost predictor returns prediction only when confidence >= CONF_THRESHOLD
             // To be extra conservative we can compare ghost accuracy vs regular accuracy per-PC here
             // For now, enforce the confidence gating implemented inside the predictor and use ghost
+            sim_stats.ghost_overrides++;
             arch_instr.branch_prediction = ghost_prediction;
             used_ghost = true;
         }
@@ -256,6 +258,10 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
                 // Update regular predictor mispredicts: do not decrement; instead, nothing to do here for misps
                 // If we used ghost and it was correct, update ghost confidence
                 stop_fetch = arch_instr.branch_taken;
+            }
+
+            if (used_ghost) {
+              sim_stats.ghost_correct++;
             }
         }
 
