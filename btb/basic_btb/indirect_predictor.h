@@ -1,23 +1,22 @@
 #ifndef BTB_BASIC_BTB_INDIRECT_PREDICTOR_H
 #define BTB_BASIC_BTB_INDIRECT_PREDICTOR_H
 
-#include <array>
-#include <bitset>
 #include <cstdint>
 #include <utility>
 
 #include "address.h"
-#include "champsim.h"
-#include "msl/bits.h"
+
+// The indirect-target predictor is an ITTAGE (class my_predictor), ported from
+// the UCP_ISCA24 artifact (ittage_64KB.h). It replaces the previous simple
+// gshare-indexed table. Forward-declared here; defined in ittage_64KB.h and
+// only included by indirect_predictor.cc.
+class my_predictor;
 
 struct indirect_predictor {
-  static constexpr std::size_t size = 4096;
-  std::array<champsim::address, size> predictor = {};
-  std::bitset<champsim::msl::lg2(size)> conditional_history = {};
+  my_predictor* ittage = nullptr;
 
   std::pair<champsim::address, bool> prediction(champsim::address ip);
-  void update_target(champsim::address ip, champsim::address branch_target);
-  void update_direction(bool taken);
+  void update(champsim::address ip, champsim::address branch_target, bool taken, uint8_t branch_type);
 };
 
 #endif

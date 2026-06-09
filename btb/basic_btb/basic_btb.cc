@@ -34,12 +34,9 @@ void basic_btb::update_btb(champsim::address ip, champsim::address branch_target
   if (branch_type == BRANCH_DIRECT_CALL || branch_type == BRANCH_INDIRECT_CALL)
     ras.push(ip);
 
-  // updates for indirect branches
-  if ((branch_type == BRANCH_INDIRECT) || (branch_type == BRANCH_INDIRECT_CALL))
-    indirect.update_target(ip, branch_target);
-
-  if (branch_type == BRANCH_CONDITIONAL)
-    indirect.update_direction(taken);
+  // ITTAGE indirect predictor: train on every branch (it trains the indirect
+  // tables only for indirect branches internally, and advances global history)
+  indirect.update(ip, branch_target, taken, branch_type);
 
   if (branch_type == BRANCH_RETURN)
     ras.calibrate_call_size(branch_target);
