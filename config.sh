@@ -41,6 +41,8 @@ if __name__ == '__main__':
             help='The directory to store the resulting executables')
     path_group.add_argument('--makedir',
             help='The directory to store the resulting makefile fragment. Note that `make` must later be invoked with -I.')
+    path_group.add_argument('--name', metavar='NAME',
+            help='Override the executable_name from the config file(s) (highest priority). Produces <bindir>/NAME')
 
     search_group = parser.add_argument_group(title='Search Paths', description='Options that direct ChampSim to search additional paths for modules')
 
@@ -81,6 +83,10 @@ if __name__ == '__main__':
         config_files = itertools.product(*files, ({},))
     elif args.join == 'chain':
         config_files = ((c,) for c in itertools.chain(*files))
+
+    # --name overrides executable_name at highest priority (must be the last config in each list)
+    if args.name:
+        config_files = (tuple(c) + ({'executable_name': args.name},) for c in config_files)
 
     parsed_test = config.parse.parse_config({'executable_name': '000-test-main'}, module_dir=[os.path.join(test_root, 'cpp', 'modules')], compile_all_modules=True)
 
