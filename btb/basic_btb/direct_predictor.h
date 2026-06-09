@@ -16,7 +16,7 @@ struct direct_predictor {
     CONDITIONAL,
   };
 
-  static constexpr std::size_t sets = 1024;
+  static constexpr std::size_t sets = 8192; // 8192 x 8 = 64Ke entries, matching UCP_ISCA24's BasicBTB<8192,8>
   static constexpr std::size_t ways = 8;
 
   struct btb_entry_t {
