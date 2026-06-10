@@ -192,10 +192,12 @@ long O3_CPU::check_dib()
 
 void O3_CPU::do_check_dib(ooo_model_instr& instr)
 {
-  // Check DIB to see if we recently fetched this line
-  auto dib_result = DIB.check_hit(instr.ip);
-  if (dib_result) {
-    // The cache line is in the L0, so we can mark this as complete
+  // Check the micro-op cache to see if we recently decoded this window
+  bool hit = DIB.check_hit(instr.ip);
+  ++sim_stats.uop_cache_reads;
+  if (hit) {
+    ++sim_stats.uop_cache_hits;
+    // The u-ops are in the DIB, so we can mark this as complete
     instr.fetch_completed = true;
 
     // Also mark it as decoded
@@ -203,12 +205,22 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
 
     // It can be acted on immediately
     instr.ready_time = current_time;
+
+    // Any hit (re)enters stream mode (no hysteresis, as in UCP_ISCA24)
+    fetch_mode = fetch_mode_type::STREAM;
+  } else if (fetch_mode == fetch_mode_type::STREAM) {
+    // stream -> build switch on the first miss: pay a 1-cycle fetch stall
+    fetch_mode = fetch_mode_type::BUILD;
+    if (!warmup) {
+      fetch_resume_time = std::max(fetch_resume_time, current_time + clock_period);
+    }
+    ++sim_stats.switch_stalls;
   }
 
   instr.dib_checked = true;
 
   if constexpr (champsim::debug_print) {
-    fmt::print("[DIB] {} instr_id: {} ip: {} hit: {} cycle: {}\n", __func__, instr.instr_id, instr.ip, dib_result.has_value(),
+    fmt::print("[DIB] {} instr_id: {} ip: {} hit: {} cycle: {}\n", __func__, instr.instr_id, instr.ip, hit,
                current_time.time_since_epoch() / clock_period);
   }
 }
@@ -383,7 +395,13 @@ long O3_CPU::decode_instruction()
   return progress;
 }
 
-void O3_CPU::do_dib_update(const ooo_model_instr& instr) { DIB.fill(instr.ip); }
+void O3_CPU::do_dib_update(const ooo_model_instr& instr)
+{
+  // Build a u-op-cache entry; terminate it on a taken branch (the paper's intent;
+  // UCP's demand path used only BRANCH_DIRECT_JUMP) with a 2-branch-per-entry cap.
+  const bool taken_end = instr.is_branch && instr.branch_taken;
+  DIB.fill(instr.ip, taken_end, instr.is_branch);
+}
 
 long O3_CPU::dispatch_instruction()
 {

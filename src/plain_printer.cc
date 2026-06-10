@@ -56,6 +56,14 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               ::print_ratio(std::kilo::num * total_mispredictions, stats.instrs()),
                               ::print_ratio(stats.total_rob_occupancy_at_branch_mispredict, total_mispredictions)));
 
+  lines.push_back(fmt::format("{} uop-cache mode-switch stalls: {} MPKI: {}", stats.name, stats.switch_stalls,
+                              ::print_ratio(std::kilo::num * static_cast<long long>(stats.switch_stalls), stats.instrs())));
+
+  lines.push_back(fmt::format("{} uop-cache hit rate: {}% hits: {} reads: {} MPKI: {}", stats.name,
+                              ::print_ratio(100 * static_cast<long long>(stats.uop_cache_hits), static_cast<long long>(stats.uop_cache_reads)),
+                              stats.uop_cache_hits, stats.uop_cache_reads,
+                              ::print_ratio(std::kilo::num * static_cast<long long>(stats.uop_cache_reads - stats.uop_cache_hits), stats.instrs())));
+
   lines.emplace_back("Branch type MPKI");
   for (auto idx : types) {
     lines.push_back(fmt::format("{}: {}", branch_type_names.at(champsim::to_underlying(idx)),

@@ -39,6 +39,7 @@
 #include "core_builder.h"
 #include "core_stats.h"
 #include "instruction.h"
+#include "micro_op_cache.h"
 #include "modules.h"
 #include "operable.h"
 #include "register_allocator.h"
@@ -102,13 +103,14 @@ public:
 
   stats_type roi_stats{}, sim_stats{};
 
-  // instruction buffer
-  struct dib_shift {
-    champsim::data::bits shamt;
-    auto operator()(champsim::address val) const { return val.slice_upper(shamt); }
-  };
-  using dib_type = champsim::lru_table<champsim::address, dib_shift, dib_shift>;
-  dib_type DIB;
+  // instruction buffer (micro-op cache / decoded-instruction buffer)
+  micro_op_cache DIB;
+
+  // micro-op-cache front-end mode: STREAM = serving decoded u-ops from the DIB,
+  // BUILD = fetching from L1I + decoding. Switching STREAM->BUILD costs a 1-cycle
+  // fetch stall (modeled like UCP_ISCA24). See do_check_dib().
+  enum class fetch_mode_type { STREAM, BUILD };
+  fetch_mode_type fetch_mode{fetch_mode_type::STREAM};
 
   // reorder buffer, load/store queue, register file
   std::deque<ooo_model_instr> IFETCH_BUFFER;
@@ -239,7 +241,7 @@ public:
   template <typename... Bs, typename... Ts>
   explicit O3_CPU(champsim::core_builder<champsim::core_builder_module_type_holder<Bs...>, champsim::core_builder_module_type_holder<Ts...>> b)
       : champsim::operable(b.m_clock_period), cpu(b.m_cpu),
-        DIB(b.m_dib_set, b.m_dib_way, {champsim::data::bits{champsim::lg2(b.m_dib_window)}}, {champsim::data::bits{champsim::lg2(b.m_dib_window)}}),
+        DIB(b.m_dib_set, b.m_dib_way, champsim::data::bits{champsim::lg2(b.m_dib_window)}),
         LQ(b.m_lq_size), IFETCH_BUFFER_SIZE(b.m_ifetch_buffer_size), DISPATCH_BUFFER_SIZE(b.m_dispatch_buffer_size), DECODE_BUFFER_SIZE(b.m_decode_buffer_size),
         REGISTER_FILE_SIZE(b.m_register_file_size), ROB_SIZE(b.m_rob_size), SQ_SIZE(b.m_sq_size), DIB_HIT_BUFFER_SIZE(b.m_dib_hit_buffer_size),
         FETCH_WIDTH(b.m_fetch_width), DECODE_WIDTH(b.m_decode_width), DISPATCH_WIDTH(b.m_dispatch_width), SCHEDULER_SIZE(b.m_schedule_width),
