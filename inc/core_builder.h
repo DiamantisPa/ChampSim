@@ -39,6 +39,7 @@ struct core_builder_base {
   std::size_t m_dib_set{1};
   std::size_t m_dib_way{1};
   std::size_t m_dib_window{1};
+  bool m_dib_ideal{false}; // ideal u-op cache: every lookup hits (perfect-DIB upper bound)
   std::size_t m_ifetch_buffer_size{1};
   std::size_t m_decode_buffer_size{1};
   std::size_t m_dispatch_buffer_size{1};
@@ -112,6 +113,11 @@ public:
    * Specify the size of the window within which Decoded Instruction Buffer entries are equivalent.
    */
   self_type& dib_window(std::size_t dib_window_);
+
+  /**
+   * Make the Decoded Instruction Buffer (u-op cache) ideal: every lookup hits.
+   */
+  self_type& dib_ideal(bool dib_ideal_);
 
   /**
    * Specify the maximum size of the instruction fetch buffer.
@@ -301,6 +307,13 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::dib_window(std::size_t dib_window_) -> self_type&
 {
   m_dib_window = dib_window_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::dib_ideal(bool dib_ideal_) -> self_type&
+{
+  m_dib_ideal = dib_ideal_;
   return *this;
 }
 

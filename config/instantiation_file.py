@@ -65,6 +65,7 @@ dib_builder_parts = {
     'sets': '  .dib_set({DIB[sets]})',
     'ways': '  .dib_way({DIB[ways]})',
     'window_size': '  .dib_window({DIB[window_size]})',
+    'ideal': '  .dib_ideal({DIB[ideal]})',
     'inorder_width': '  .dib_inorder_width(champsim::bandwidth::maximum_type{{{DIB[inorder_width]}}})',
     'hit_buffer_size': '  .dib_hit_buffer_size({DIB[inorder_width]})',
 }

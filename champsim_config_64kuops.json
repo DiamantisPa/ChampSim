@@ -14,7 +14,7 @@
       "rob_size": 352,
       "lq_size": 128,
       "sq_size": 72,
-      "fetch_width": 6,
+      "fetch_width": 16,
       "decode_width": 6,
       "dispatch_width": 6,
       "execute_width": 4,
@@ -34,7 +34,8 @@
   "DIB": {
     "window_size": 32,
     "sets": 1024,
-    "ways": 8
+    "ways": 8,
+    "inorder_width": 8
   },
   "L1I": {
     "sets": 64,

@@ -37,14 +37,16 @@ public:
     uint64_t last_used = 0;          // LRU timestamp
   };
 
-  micro_op_cache(std::size_t sets, std::size_t ways, champsim::data::bits window_bits)
-      : NUM_SET(sets), NUM_WAY(ways), window_shift(window_bits), block(sets * ways)
+  micro_op_cache(std::size_t sets, std::size_t ways, champsim::data::bits window_bits, bool ideal = false)
+      : NUM_SET(sets), NUM_WAY(ways), window_shift(window_bits), ideal_(ideal), block(sets * ways)
   {
   }
 
   // stream-mode lookup: hit on any matching window tag (tag-only, as in UCP).
   bool check_hit(champsim::address ip)
   {
+    if (ideal_) // ideal u-op cache: every lookup hits (perfect-DIB upper bound)
+      return true;
     if (block.empty()) // disabled (no u-op cache: sets==0 or ways==0)
       return false;
     auto t = tag_of(ip);
@@ -108,6 +110,7 @@ private:
   std::size_t NUM_SET;
   std::size_t NUM_WAY;
   champsim::data::bits window_shift;
+  bool ideal_;
   std::vector<entry> block;
   uint64_t lru_clock = 0;
 
