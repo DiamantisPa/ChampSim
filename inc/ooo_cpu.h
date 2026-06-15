@@ -43,6 +43,7 @@
 #include "modules.h"
 #include "operable.h"
 #include "register_allocator.h"
+#include "trace_segmenter.h"
 #include "util/lru_table.h"
 #include "util/to_underlying.h"
 
@@ -111,6 +112,9 @@ public:
   // fetch stall (modeled like UCP_ISCA24). See do_check_dib().
   enum class fetch_mode_type { STREAM, BUILD };
   fetch_mode_type fetch_mode{fetch_mode_type::STREAM};
+
+  // Prometheus trace segmentation, fed from the post-merge u-op stream
+  trace_segmenter segmenter{};
 
   // reorder buffer, load/store queue, register file
   std::deque<ooo_model_instr> IFETCH_BUFFER;

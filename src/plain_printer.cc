@@ -64,6 +64,17 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.uop_cache_hits, stats.uop_cache_reads,
                               ::print_ratio(std::kilo::num * static_cast<long long>(stats.uop_cache_reads - stats.uop_cache_hits), stats.instrs())));
 
+  lines.push_back(fmt::format("{} trace-seg: loop {} function {} dedup-hits {} entangled {} dropped: bad-layout {} overflow {} short {} stored-uops {} invariant-violations {}",
+                              stats.name, stats.seg_traces_loop, stats.seg_traces_function, stats.seg_traces_dedup, stats.seg_traces_entangled,
+                              stats.seg_traces_dropped_bad_layout, stats.seg_traces_dropped_overflow, stats.seg_traces_dropped_short,
+                              stats.seg_stored_uops, stats.seg_invariant_violations));
+
+  lines.push_back(fmt::format("{} trace-seg coverage: unique IPs {}/{} ({}%) dynamic uops {}/{} ({}%)", stats.name, stats.seg_unique_ips_covered,
+                              stats.seg_unique_ips_seen,
+                              ::print_ratio(100 * static_cast<long long>(stats.seg_unique_ips_covered), static_cast<long long>(stats.seg_unique_ips_seen)),
+                              stats.seg_dynamic_uops_covered, stats.seg_dynamic_uops,
+                              ::print_ratio(100 * static_cast<long long>(stats.seg_dynamic_uops_covered), static_cast<long long>(stats.seg_dynamic_uops))));
+
   lines.emplace_back("Branch type MPKI");
   for (auto idx : types) {
     lines.push_back(fmt::format("{}: {}", branch_type_names.at(champsim::to_underlying(idx)),

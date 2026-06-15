@@ -387,8 +387,17 @@ long O3_CPU::decode_instruction()
 
   long progress{std::distance(dib_hit_buffer_begin, dib_hit_buffer_end) + std::distance(decode_buffer_begin, decode_buffer_end)};
 
+  auto dispatch_prev_size = std::size(DISPATCH_BUFFER);
   std::merge(dib_hit_buffer_begin, dib_hit_buffer_end, decode_buffer_begin, decode_buffer_end, std::back_inserter(DISPATCH_BUFFER),
              ooo_model_instr::program_order);
+
+  // Prometheus trace segmentation: observe the post-merge u-op stream (u-op
+  // cache hits + decoded u-ops, in program order) as it enters dispatch
+  if (!warmup) {
+    for (auto idx = dispatch_prev_size; idx < std::size(DISPATCH_BUFFER); ++idx) {
+      segmenter.push(DISPATCH_BUFFER[idx], sim_stats);
+    }
+  }
   DECODE_BUFFER.erase(decode_buffer_begin, decode_buffer_end);
   DIB_HIT_BUFFER.erase(dib_hit_buffer_begin, dib_hit_buffer_end);
 
