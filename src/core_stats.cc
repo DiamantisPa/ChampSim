@@ -25,6 +25,54 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.seg_dynamic_uops_covered -= rhs.seg_dynamic_uops_covered;
   lhs.seg_invariant_violations -= rhs.seg_invariant_violations;
 
+  lhs.rec_traces_loop -= rhs.rec_traces_loop;
+  lhs.rec_traces_function -= rhs.rec_traces_function;
+  lhs.rec_traces_dedup -= rhs.rec_traces_dedup;
+  lhs.rec_traces_entangled -= rhs.rec_traces_entangled;
+  lhs.rec_traces_dropped_bad_layout -= rhs.rec_traces_dropped_bad_layout;
+  lhs.rec_traces_dropped_overflow -= rhs.rec_traces_dropped_overflow;
+  lhs.rec_traces_dropped_short -= rhs.rec_traces_dropped_short;
+  lhs.rec_stored_uops -= rhs.rec_stored_uops;
+  lhs.rec_unique_ips_seen -= rhs.rec_unique_ips_seen;
+  lhs.rec_unique_ips_covered -= rhs.rec_unique_ips_covered;
+  lhs.rec_dynamic_uops -= rhs.rec_dynamic_uops;
+  lhs.rec_dynamic_uops_covered -= rhs.rec_dynamic_uops_covered;
+  lhs.rec_invariant_violations -= rhs.rec_invariant_violations;
+
+  lhs.stg_traces_loop -= rhs.stg_traces_loop;
+  lhs.stg_traces_function -= rhs.stg_traces_function;
+  lhs.stg_traces_dedup -= rhs.stg_traces_dedup;
+  lhs.stg_traces_entangled -= rhs.stg_traces_entangled;
+  lhs.stg_traces_dropped_bad_layout -= rhs.stg_traces_dropped_bad_layout;
+  lhs.stg_traces_dropped_overflow -= rhs.stg_traces_dropped_overflow;
+  lhs.stg_traces_dropped_short -= rhs.stg_traces_dropped_short;
+  lhs.stg_stored_uops -= rhs.stg_stored_uops;
+  lhs.stg_unique_ips_seen -= rhs.stg_unique_ips_seen;
+  lhs.stg_unique_ips_covered -= rhs.stg_unique_ips_covered;
+  lhs.stg_dynamic_uops -= rhs.stg_dynamic_uops;
+  lhs.stg_dynamic_uops_covered -= rhs.stg_dynamic_uops_covered;
+  lhs.stg_invariant_violations -= rhs.stg_invariant_violations;
+
+  lhs.seg_dyn_covered_final -= rhs.seg_dyn_covered_final;
+  lhs.seg_dyn_lost_no_trigger -= rhs.seg_dyn_lost_no_trigger;
+  lhs.seg_dyn_lost_overflow -= rhs.seg_dyn_lost_overflow;
+  lhs.seg_dyn_lost_bad_layout -= rhs.seg_dyn_lost_bad_layout;
+  lhs.seg_dyn_lost_short -= rhs.seg_dyn_lost_short;
+  lhs.rec_dyn_covered_final -= rhs.rec_dyn_covered_final;
+  lhs.rec_dyn_lost_no_trigger -= rhs.rec_dyn_lost_no_trigger;
+  lhs.rec_dyn_lost_overflow -= rhs.rec_dyn_lost_overflow;
+  lhs.rec_dyn_lost_bad_layout -= rhs.rec_dyn_lost_bad_layout;
+  lhs.rec_dyn_lost_short -= rhs.rec_dyn_lost_short;
+  lhs.stg_dyn_covered_final -= rhs.stg_dyn_covered_final;
+  lhs.stg_dyn_lost_no_trigger -= rhs.stg_dyn_lost_no_trigger;
+  lhs.stg_dyn_lost_overflow -= rhs.stg_dyn_lost_overflow;
+  lhs.stg_dyn_lost_bad_layout -= rhs.stg_dyn_lost_bad_layout;
+  lhs.stg_dyn_lost_short -= rhs.stg_dyn_lost_short;
+
+  lhs.xcov_seg_not_stg -= rhs.xcov_seg_not_stg;
+  lhs.xcov_seg_not_rec -= rhs.xcov_seg_not_rec;
+  lhs.xcov_stg_not_rec -= rhs.xcov_stg_not_rec;
+
   lhs.total_branch_types -= rhs.total_branch_types;
   lhs.branch_type_misses -= rhs.branch_type_misses;
 

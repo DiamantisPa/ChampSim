@@ -19,6 +19,8 @@
 
 #include <cstdint>
 #include <limits>
+#include <string>
+#include <utility>
 
 #include "chrono.h"
 
@@ -40,6 +42,7 @@ struct core_builder_base {
   std::size_t m_dib_way{1};
   std::size_t m_dib_window{1};
   bool m_dib_ideal{false}; // ideal u-op cache: every lookup hits (perfect-DIB upper bound)
+  std::string m_trace_builder{"both"}; // Prometheus trace builder: both/backward/forward/off
   std::size_t m_ifetch_buffer_size{1};
   std::size_t m_decode_buffer_size{1};
   std::size_t m_dispatch_buffer_size{1};
@@ -118,6 +121,12 @@ public:
    * Make the Decoded Instruction Buffer (u-op cache) ideal: every lookup hits.
    */
   self_type& dib_ideal(bool dib_ideal_);
+
+  /**
+   * Select which Prometheus trace builder(s) observe the post-merge u-op
+   * stream: "both" (default), "backward"/"seg", "forward"/"rec", or "off".
+   */
+  self_type& trace_builder(std::string trace_builder_);
 
   /**
    * Specify the maximum size of the instruction fetch buffer.
@@ -314,6 +323,13 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::dib_ideal(bool dib_ideal_) -> self_type&
 {
   m_dib_ideal = dib_ideal_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_builder(std::string trace_builder_) -> self_type&
+{
+  m_trace_builder = std::move(trace_builder_);
   return *this;
 }
 

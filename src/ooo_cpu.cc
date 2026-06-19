@@ -19,7 +19,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
+#include <string>
 #include <fmt/chrono.h>
 #include <fmt/core.h>
 #include <fmt/ranges.h>
@@ -82,7 +84,48 @@ void O3_CPU::end_phase(unsigned finished_cpu)
     finish_phase_instr = num_retired;
     finish_phase_time = current_time;
 
+    finalize_coverage_stats();
     roi_stats = sim_stats;
+  }
+}
+
+// End-of-phase: compute the derived trace-coverage attribution (time-agnostic
+// covered-final, never-covered loss buckets, and cross-builder dynamic diffs)
+// from the builders' accumulated per-IP state into sim_stats.
+void O3_CPU::finalize_coverage_stats()
+{
+  if (trace_seg_enable) {
+    segmenter.finalize_coverage(sim_stats);
+  }
+  if (trace_rec_enable) {
+    recorder.finalize_coverage(sim_stats);
+  }
+  if (trace_stg_enable) {
+    stager.finalize_coverage(sim_stats);
+  }
+
+  // cross-builder dynamic-weighted diffs: the dynamic stream is identical across
+  // builders, so iterate any enabled builder's dyn_counts and compare covered sets
+  const std::unordered_map<uint64_t, uint64_t>* dyn = nullptr;
+  if (trace_seg_enable) {
+    dyn = &segmenter.dyn_counts();
+  } else if (trace_stg_enable) {
+    dyn = &stager.dyn_counts();
+  } else if (trace_rec_enable) {
+    dyn = &recorder.dyn_counts();
+  }
+  if (dyn != nullptr) {
+    for (const auto& [ip, cnt] : *dyn) {
+      if (trace_seg_enable && trace_stg_enable && segmenter.covers(ip) && !stager.covers(ip)) {
+        sim_stats.xcov_seg_not_stg += cnt;
+      }
+      if (trace_seg_enable && trace_rec_enable && segmenter.covers(ip) && !recorder.covers(ip)) {
+        sim_stats.xcov_seg_not_rec += cnt;
+      }
+      if (trace_stg_enable && trace_rec_enable && stager.covers(ip) && !recorder.covers(ip)) {
+        sim_stats.xcov_stg_not_rec += cnt;
+      }
+    }
   }
 }
 
@@ -392,10 +435,21 @@ long O3_CPU::decode_instruction()
              ooo_model_instr::program_order);
 
   // Prometheus trace segmentation: observe the post-merge u-op stream (u-op
-  // cache hits + decoded u-ops, in program order) as it enters dispatch
-  if (!warmup) {
+  // cache hits + decoded u-ops, in program order) as it enters dispatch.  Which
+  // builder(s) run is resolved once in the constructor from the "trace_builder"
+  // config field, overridable at run time by the PROMETHEUS_TRACE env var (see
+  // O3_CPU::resolve_trace_builder).
+  if (!warmup && (trace_seg_enable || trace_rec_enable || trace_stg_enable)) {
     for (auto idx = dispatch_prev_size; idx < std::size(DISPATCH_BUFFER); ++idx) {
-      segmenter.push(DISPATCH_BUFFER[idx], sim_stats);
+      if (trace_seg_enable) {
+        segmenter.push(DISPATCH_BUFFER[idx], sim_stats);
+      }
+      if (trace_rec_enable) {
+        recorder.push(DISPATCH_BUFFER[idx], sim_stats);
+      }
+      if (trace_stg_enable) {
+        stager.push(DISPATCH_BUFFER[idx], sim_stats);
+      }
     }
   }
   DECODE_BUFFER.erase(decode_buffer_begin, decode_buffer_end);

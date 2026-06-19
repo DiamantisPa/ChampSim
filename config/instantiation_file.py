@@ -28,6 +28,7 @@ vmem_fmtstr = 'champsim::data::bytes{{{pte_page_size}}}, {num_levels}, champsim:
 queue_fmtstr = '{rq_size}, {pq_size}, {wq_size}, champsim::data::bits{{{_offset_bits}}}, {_queue_check_full_addr:b}'
 
 core_builder_parts = {
+    'trace_builder': '.trace_builder("{trace_builder}")',
     'ifetch_buffer_size': '.ifetch_buffer_size({ifetch_buffer_size})',
     'decode_buffer_size': '.decode_buffer_size({decode_buffer_size})',
     'dispatch_buffer_size': '.dispatch_buffer_size({dispatch_buffer_size})',

@@ -75,6 +75,40 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.seg_dynamic_uops_covered, stats.seg_dynamic_uops,
                               ::print_ratio(100 * static_cast<long long>(stats.seg_dynamic_uops_covered), static_cast<long long>(stats.seg_dynamic_uops))));
 
+  lines.push_back(fmt::format("{} trace-rec: loop {} function {} dedup-hits {} entangled {} dropped: bad-layout {} overflow {} short {} stored-uops {} invariant-violations {}",
+                              stats.name, stats.rec_traces_loop, stats.rec_traces_function, stats.rec_traces_dedup, stats.rec_traces_entangled,
+                              stats.rec_traces_dropped_bad_layout, stats.rec_traces_dropped_overflow, stats.rec_traces_dropped_short,
+                              stats.rec_stored_uops, stats.rec_invariant_violations));
+
+  lines.push_back(fmt::format("{} trace-rec coverage: unique IPs {}/{} ({}%) dynamic uops {}/{} ({}%)", stats.name, stats.rec_unique_ips_covered,
+                              stats.rec_unique_ips_seen,
+                              ::print_ratio(100 * static_cast<long long>(stats.rec_unique_ips_covered), static_cast<long long>(stats.rec_unique_ips_seen)),
+                              stats.rec_dynamic_uops_covered, stats.rec_dynamic_uops,
+                              ::print_ratio(100 * static_cast<long long>(stats.rec_dynamic_uops_covered), static_cast<long long>(stats.rec_dynamic_uops))));
+
+  lines.push_back(fmt::format("{} trace-stg: loop {} function {} dedup-hits {} entangled {} dropped: bad-layout {} overflow {} short {} stored-uops {} invariant-violations {}",
+                              stats.name, stats.stg_traces_loop, stats.stg_traces_function, stats.stg_traces_dedup, stats.stg_traces_entangled,
+                              stats.stg_traces_dropped_bad_layout, stats.stg_traces_dropped_overflow, stats.stg_traces_dropped_short,
+                              stats.stg_stored_uops, stats.stg_invariant_violations));
+
+  lines.push_back(fmt::format("{} trace-stg coverage: unique IPs {}/{} ({}%) dynamic uops {}/{} ({}%)", stats.name, stats.stg_unique_ips_covered,
+                              stats.stg_unique_ips_seen,
+                              ::print_ratio(100 * static_cast<long long>(stats.stg_unique_ips_covered), static_cast<long long>(stats.stg_unique_ips_seen)),
+                              stats.stg_dynamic_uops_covered, stats.stg_dynamic_uops,
+                              ::print_ratio(100 * static_cast<long long>(stats.stg_dynamic_uops_covered), static_cast<long long>(stats.stg_dynamic_uops))));
+
+  lines.push_back(fmt::format("{} trace-seg loss(dyn): covered-final {} latency {} | no-trigger {} overflow {} bad-layout {} short {}", stats.name,
+                              stats.seg_dyn_covered_final, stats.seg_dyn_covered_final - stats.seg_dynamic_uops_covered, stats.seg_dyn_lost_no_trigger,
+                              stats.seg_dyn_lost_overflow, stats.seg_dyn_lost_bad_layout, stats.seg_dyn_lost_short));
+  lines.push_back(fmt::format("{} trace-rec loss(dyn): covered-final {} latency {} | no-trigger {} overflow {} bad-layout {} short {}", stats.name,
+                              stats.rec_dyn_covered_final, stats.rec_dyn_covered_final - stats.rec_dynamic_uops_covered, stats.rec_dyn_lost_no_trigger,
+                              stats.rec_dyn_lost_overflow, stats.rec_dyn_lost_bad_layout, stats.rec_dyn_lost_short));
+  lines.push_back(fmt::format("{} trace-stg loss(dyn): covered-final {} latency {} | no-trigger {} overflow {} bad-layout {} short {}", stats.name,
+                              stats.stg_dyn_covered_final, stats.stg_dyn_covered_final - stats.stg_dynamic_uops_covered, stats.stg_dyn_lost_no_trigger,
+                              stats.stg_dyn_lost_overflow, stats.stg_dyn_lost_bad_layout, stats.stg_dyn_lost_short));
+  lines.push_back(fmt::format("{} trace xcov(dyn): seg-not-stg {} seg-not-rec {} stg-not-rec {}", stats.name, stats.xcov_seg_not_stg, stats.xcov_seg_not_rec,
+                              stats.xcov_stg_not_rec));
+
   lines.emplace_back("Branch type MPKI");
   for (auto idx : types) {
     lines.push_back(fmt::format("{}: {}", branch_type_names.at(champsim::to_underlying(idx)),

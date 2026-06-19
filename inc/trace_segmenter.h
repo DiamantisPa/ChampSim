@@ -10,6 +10,7 @@
 
 #include "core_stats.h"
 #include "instruction.h"
+#include "trace_coverage.h"
 
 // Prometheus-style trace segmentation, observing the post-merge u-op stream
 // (the program-ordered stream entering DISPATCH_BUFFER).
@@ -64,14 +65,8 @@ public:
   // raw-field variant (also used by the self-test)
   void push_raw(uint64_t ip, uint64_t target, uint8_t type, bool is_branch, bool taken, cpu_stats& stats)
   {
-    // dynamic-stream coverage: is this u-op already covered by a trace?
-    ++stats.seg_dynamic_uops;
-    if (covered_ips.count(ip) > 0) {
-      ++stats.seg_dynamic_uops_covered;
-    }
-    if (seen_ips.insert(ip).second) {
-      ++stats.seg_unique_ips_seen;
-    }
+    // dynamic-stream coverage + per-IP attribution (see inc/trace_coverage.h)
+    cov.observe(ip, stats.seg_dynamic_uops, stats.seg_dynamic_uops_covered, stats.seg_unique_ips_seen);
 
     ring.push_back({ip, target, type, is_branch, taken});
     if (ring.size() > RING_CAPACITY) {
@@ -90,6 +85,14 @@ public:
 
   [[nodiscard]] const std::vector<trace>& get_traces() const { return traces; }
 
+  // coverage-loss attribution (see inc/trace_coverage.h); call once at end of run
+  void finalize_coverage(cpu_stats& stats) const
+  {
+    cov.finalize(stats.seg_dyn_covered_final, stats.seg_dyn_lost_no_trigger, stats.seg_dyn_lost_overflow, stats.seg_dyn_lost_bad_layout, stats.seg_dyn_lost_short);
+  }
+  [[nodiscard]] bool covers(uint64_t ip) const { return cov.covers(ip); }
+  [[nodiscard]] const std::unordered_map<uint64_t, uint64_t>& dyn_counts() const { return cov.dyn_count; }
+
 private:
   struct rec {
     uint64_t ip = 0;
@@ -103,6 +106,13 @@ private:
   static bool is_unconditional(uint8_t t) { return t == BRANCH_DIRECT_JUMP || t == BRANCH_INDIRECT; }
   static bool is_backward(const rec& r) { return r.is_branch && r.taken && !is_call(r.type) && r.type != BRANCH_RETURN && r.target < r.ip; }
   static bool is_taken_forward(const rec& r) { return r.is_branch && r.taken && !is_call(r.type) && r.type != BRANCH_RETURN && r.target > r.ip; }
+
+  void mark_range(std::size_t lo, std::size_t hi, coverage_meter::reason reason)
+  {
+    for (std::size_t k = lo; k <= hi && k < ring.size(); ++k) {
+      cov.mark(ring[k].ip, reason);
+    }
+  }
 
   // loop trace: trigger is the taken backward branch at the back of the ring
   void build_loop_trace(cpu_stats& stats)
@@ -120,6 +130,7 @@ private:
     }
     if (t_idx == SIZE_MAX) { // loop body longer than the buffer
       ++stats.seg_traces_dropped_overflow;
+      mark_range(0, j, coverage_meter::OVERFLOW);
       return;
     }
 
@@ -147,6 +158,7 @@ private:
       for (std::size_t k = start; k < j; ++k) {
         if (is_taken_forward(ring[k])) {
           ++stats.seg_traces_dropped_bad_layout;
+          mark_range(start, j, coverage_meter::BAD_LAYOUT);
           return;
         }
       }
@@ -172,6 +184,7 @@ private:
 
     if (end < start || (end - start + 1) < MIN_TRACE_UOPS) {
       ++stats.seg_traces_dropped_short;
+      mark_range(start, end, coverage_meter::SHORT);
       return;
     }
     finalize(start, end, false, stats);
@@ -202,12 +215,14 @@ private:
     }
     if (c_idx == SIZE_MAX) { // call not in the buffer anymore
       ++stats.seg_traces_dropped_overflow;
+      mark_range(0, j, coverage_meter::OVERFLOW);
       return;
     }
 
     const std::size_t start = c_idx + 1; // function entry (call excluded)
     if (start > j || (j - start + 1) < MIN_TRACE_UOPS) {
       ++stats.seg_traces_dropped_short;
+      mark_range(start, j, coverage_meter::SHORT);
       return;
     }
     // NOTE: no entangled truncation for function traces -- the body keeps its
@@ -223,7 +238,9 @@ private:
     for (std::size_t k = start; k < end; ++k) {
       const rec& a = ring[k];
       const uint64_t next = ring[k + 1].ip;
-      const bool ok = (a.is_branch && a.taken) ? (next == a.target) : (next > a.ip && next - a.ip <= 16);
+      // non-branch: fall-through to the next instruction, or the SAME ip again
+      // (x86 REP-string ops repeat one ip across iterations) -- hence next >= ip
+      const bool ok = (a.is_branch && a.taken) ? (next == a.target) : (next >= a.ip && next - a.ip <= 16);
       if (!ok) {
         ++stats.seg_invariant_violations;
         break;
@@ -266,9 +283,7 @@ private:
 
     // code coverage: set-based, so no instruction is ever counted twice
     for (auto v : tr.ips) {
-      if (covered_ips.insert(v).second) {
-        ++stats.seg_unique_ips_covered;
-      }
+      cov.cover(v, stats.seg_unique_ips_covered);
     }
 
     hash_to_id.emplace(h, tr.id);
@@ -278,8 +293,7 @@ private:
   std::deque<rec> ring;
   std::vector<trace> traces;
   std::unordered_map<uint64_t, uint32_t> hash_to_id;
-  std::unordered_set<uint64_t> seen_ips;
-  std::unordered_set<uint64_t> covered_ips;
+  coverage_meter cov;
 };
 
 #endif

@@ -33,6 +33,63 @@ struct cpu_stats {
   uint64_t seg_dynamic_uops_covered = 0;     // ... whose ip was covered by a trace at that time
   uint64_t seg_invariant_violations = 0;     // stored windows that were not a valid committed path (should be 0)
 
+  // forward armed-recorder trace builder (see inc/trace_recorder.h) -- the
+  // hardware-faithful alternative to the backward segmenter above, run in
+  // parallel so the two can be diffed.
+  uint64_t rec_traces_loop = 0;
+  uint64_t rec_traces_function = 0;
+  uint64_t rec_traces_dedup = 0;
+  uint64_t rec_traces_entangled = 0;
+  uint64_t rec_traces_dropped_bad_layout = 0;
+  uint64_t rec_traces_dropped_overflow = 0;
+  uint64_t rec_traces_dropped_short = 0;
+  uint64_t rec_stored_uops = 0;
+  uint64_t rec_unique_ips_seen = 0;
+  uint64_t rec_unique_ips_covered = 0;
+  uint64_t rec_dynamic_uops = 0;
+  uint64_t rec_dynamic_uops_covered = 0;
+  uint64_t rec_invariant_violations = 0;
+
+  // staging-buffer trace builder (see inc/trace_stager.h) -- the synthesizable
+  // form of the backward segmenter (short ring + pos-lookup), run in parallel.
+  uint64_t stg_traces_loop = 0;
+  uint64_t stg_traces_function = 0;
+  uint64_t stg_traces_dedup = 0;
+  uint64_t stg_traces_entangled = 0;
+  uint64_t stg_traces_dropped_bad_layout = 0;
+  uint64_t stg_traces_dropped_overflow = 0;
+  uint64_t stg_traces_dropped_short = 0;
+  uint64_t stg_stored_uops = 0;
+  uint64_t stg_unique_ips_seen = 0;
+  uint64_t stg_unique_ips_covered = 0;
+  uint64_t stg_dynamic_uops = 0;
+  uint64_t stg_dynamic_uops_covered = 0;
+  uint64_t stg_invariant_violations = 0;
+
+  // coverage-loss attribution (see inc/trace_coverage.h), per builder.  For each:
+  // covered_final (time-agnostic) + lost_{no_trigger,overflow,bad_layout,short}
+  // == total dynamic u-ops; (covered_final - dynamic_uops_covered) is build latency.
+  uint64_t seg_dyn_covered_final = 0;
+  uint64_t seg_dyn_lost_no_trigger = 0;
+  uint64_t seg_dyn_lost_overflow = 0;
+  uint64_t seg_dyn_lost_bad_layout = 0;
+  uint64_t seg_dyn_lost_short = 0;
+  uint64_t rec_dyn_covered_final = 0;
+  uint64_t rec_dyn_lost_no_trigger = 0;
+  uint64_t rec_dyn_lost_overflow = 0;
+  uint64_t rec_dyn_lost_bad_layout = 0;
+  uint64_t rec_dyn_lost_short = 0;
+  uint64_t stg_dyn_covered_final = 0;
+  uint64_t stg_dyn_lost_no_trigger = 0;
+  uint64_t stg_dyn_lost_overflow = 0;
+  uint64_t stg_dyn_lost_bad_layout = 0;
+  uint64_t stg_dyn_lost_short = 0;
+
+  // cross-builder dynamic-weighted coverage diffs (oracle vs the realizable ones)
+  uint64_t xcov_seg_not_stg = 0; // dyn u-ops covered by segmenter but not stager
+  uint64_t xcov_seg_not_rec = 0; // ... by segmenter but not recorder
+  uint64_t xcov_stg_not_rec = 0; // ... by stager but not recorder
+
   champsim::stats::event_counter<branch_type> total_branch_types = {};
   champsim::stats::event_counter<branch_type> branch_type_misses = {};
 

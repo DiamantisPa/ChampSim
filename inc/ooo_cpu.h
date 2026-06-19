@@ -24,13 +24,17 @@
 
 #include <array>
 #include <bitset>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <queue>
 #include <stdexcept>
+#include <string>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "bandwidth.h"
@@ -43,7 +47,9 @@
 #include "modules.h"
 #include "operable.h"
 #include "register_allocator.h"
+#include "trace_recorder.h"
 #include "trace_segmenter.h"
+#include "trace_stager.h"
 #include "util/lru_table.h"
 #include "util/to_underlying.h"
 
@@ -113,8 +119,31 @@ public:
   enum class fetch_mode_type { STREAM, BUILD };
   fetch_mode_type fetch_mode{fetch_mode_type::STREAM};
 
-  // Prometheus trace segmentation, fed from the post-merge u-op stream
+  // Prometheus trace builders, fed from the post-merge u-op stream, run in
+  // parallel so their coverage/trace stats can be diffed (seg_* / rec_* / stg_*):
+  //   * segmenter -- backward oracle (512-ring + backward walk; not synthesizable)
+  //   * recorder  -- forward armed-recorder (no history)
+  //   * stager    -- staging-buffer (short ring + pos-lookup; synthesizable)
   trace_segmenter segmenter{};
+  trace_recorder recorder{};
+  trace_stager stager{};
+  bool trace_seg_enable{true};  // run the backward segmenter (resolved in ctor)
+  bool trace_rec_enable{true};  // run the forward recorder   (resolved in ctor)
+  bool trace_stg_enable{false}; // run the staging builder    (resolved in ctor)
+
+  // Resolve which trace builder(s) run from the "trace_builder" config field,
+  // overridden by the PROMETHEUS_TRACE env var when set.  Returns {seg, rec, stg}.
+  // Accepted values: "both" (default = seg+rec), "backward"/"seg", "forward"/"rec",
+  // "staging"/"stg", "all" (seg+rec+stg), "off"/"none".
+  static std::tuple<bool, bool, bool> resolve_trace_builder(const std::string& cfg)
+  {
+    const char* e = std::getenv("PROMETHEUS_TRACE");
+    const std::string v = (e != nullptr && *e != '\0') ? std::string{e} : cfg;
+    const bool seg = (v == "both" || v == "backward" || v == "seg" || v == "all");
+    const bool rec = (v == "both" || v == "forward" || v == "rec" || v == "all");
+    const bool stg = (v == "staging" || v == "stg" || v == "all");
+    return {seg, rec, stg};
+  }
 
   // reorder buffer, load/store queue, register file
   std::deque<ooo_model_instr> IFETCH_BUFFER;
@@ -172,6 +201,7 @@ public:
   bool do_init_instruction(ooo_model_instr& instr);
   bool do_predict_branch(ooo_model_instr& instr);
   void do_check_dib(ooo_model_instr& instr);
+  void finalize_coverage_stats(); // end-of-phase: derived trace-coverage attribution
   bool do_fetch_instruction(std::deque<ooo_model_instr>::iterator begin, std::deque<ooo_model_instr>::iterator end);
   void do_dib_update(const ooo_model_instr& instr);
   void do_scheduling(ooo_model_instr& instr);
@@ -257,6 +287,7 @@ public:
         L1D_bus(b.m_cpu, b.m_data_queues), l1i(b.m_l1i), branch_module_pimpl(std::make_unique<branch_module_model<Bs...>>(this)),
         btb_module_pimpl(std::make_unique<btb_module_model<Ts...>>(this))
   {
+    std::tie(trace_seg_enable, trace_rec_enable, trace_stg_enable) = resolve_trace_builder(b.m_trace_builder);
   }
 };
 
