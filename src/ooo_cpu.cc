@@ -238,6 +238,27 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   // Check the micro-op cache to see if we recently decoded this window
   bool hit = DIB.check_hit(instr.ip);
   ++sim_stats.uop_cache_reads;
+  // Trace-fill: install a stored trace's windows into the DIB.  The triggering
+  // event depends on the mode (see fill_mode_type).  A miss turned into a hit by
+  // the install is served without a build-mode switch.  FLUSH does no demand fill
+  // here -- it installs only on a misprediction (see do_flush_fill).
+  if (fill_mode != fill_mode_type::OFF && fill_mode != fill_mode_type::FLUSH) {
+    const std::vector<uint64_t>* ips = nullptr;
+    if (fill_mode == fill_mode_type::EVERY) {
+      ips = fill_store.lookup_entry(instr.ip.to<uint64_t>()); // hit-or-miss at a trace entry
+    } else if (!hit) {                                        // MISS / WINDOW: only on a miss
+      ips = (fill_mode == fill_mode_type::WINDOW) ? fill_store.lookup_window(instr.ip.to<uint64_t>())
+                                                  : fill_store.lookup_entry(instr.ip.to<uint64_t>());
+    }
+    if (ips != nullptr) {
+      const std::size_t installed = DIB.install(*ips);
+      sim_stats.uop_trace_fill_windows += installed;
+      if (!hit && installed > 0) { // count only misses turned into hits (no-op when no_uop)
+        ++sim_stats.uop_trace_fill_hits;
+        hit = true;
+      }
+    }
+  }
   if (hit) {
     ++sim_stats.uop_cache_hits;
     // The u-ops are in the DIB, so we can mark this as complete
@@ -251,13 +272,22 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
 
     // Any hit (re)enters stream mode (no hysteresis, as in UCP_ISCA24)
     fetch_mode = fetch_mode_type::STREAM;
-  } else if (fetch_mode == fetch_mode_type::STREAM) {
-    // stream -> build switch on the first miss: pay a 1-cycle fetch stall
-    fetch_mode = fetch_mode_type::BUILD;
-    if (!warmup) {
-      fetch_resume_time = std::max(fetch_resume_time, current_time + clock_period);
+    in_recovery = false; // back to streaming: the misprediction refill is complete
+  } else {
+    // genuine u-op-cache miss -> build mode. Bucket it as recovery vs steady-state.
+    if (in_recovery) {
+      ++sim_stats.uop_miss_recovery;
+    } else {
+      ++sim_stats.uop_miss_steady;
     }
-    ++sim_stats.switch_stalls;
+    if (fetch_mode == fetch_mode_type::STREAM) {
+      // stream -> build switch on the first miss: pay a 1-cycle fetch stall
+      fetch_mode = fetch_mode_type::BUILD;
+      if (!warmup) {
+        fetch_resume_time = std::max(fetch_resume_time, current_time + clock_period);
+      }
+      ++sim_stats.switch_stalls;
+    }
   }
 
   instr.dib_checked = true;
@@ -265,6 +295,30 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   if constexpr (champsim::debug_print) {
     fmt::print("[DIB] {} instr_id: {} ip: {} hit: {} cycle: {}\n", __func__, instr.instr_id, instr.ip, hit,
                current_time.time_since_epoch() / clock_period);
+  }
+}
+
+void O3_CPU::do_flush_fill(const ooo_model_instr& branch)
+{
+  // FLUSH mode: on a branch misprediction, proactively install the trace covering
+  // the recovery PC so the frontend refills the pipeline from the u-op cache.
+  // The recovery PC is branch_target (the resolved next-IP) for a taken branch;
+  // it is empty for a not-taken branch (fall-through window is already resident).
+  // Window-matched: the recovery PC is an in-path address, almost never a trace
+  // entry.  Models a zero-latency prefetch (optimistic upper bound).
+  if (fill_mode != fill_mode_type::FLUSH) {
+    return;
+  }
+  const uint64_t recovery = branch.branch_target.to<uint64_t>();
+  if (recovery == 0) {
+    return;
+  }
+  if (const auto* ips = fill_store.lookup_window(recovery)) {
+    const std::size_t installed = DIB.install(*ips);
+    sim_stats.uop_trace_fill_windows += installed;
+    if (installed > 0) {
+      ++sim_stats.uop_trace_fill_hits; // here: count of mispredicts served a recovery trace
+    }
   }
 }
 
@@ -411,6 +465,8 @@ long O3_CPU::decode_instruction()
         db_entry.branch_mispredicted = 0;
         // pay misprediction penalty
         this->fetch_resume_time = this->current_time + BRANCH_MISPREDICT_PENALTY;
+        this->do_flush_fill(db_entry); // FLUSH mode: warm the recovery path
+        this->in_recovery = true;      // frontend now refilling the recovery path
       }
     }
     // Add to dispatch
@@ -448,7 +504,12 @@ long O3_CPU::decode_instruction()
         recorder.push(DISPATCH_BUFFER[idx], sim_stats);
       }
       if (trace_stg_enable) {
+        const std::size_t before = stager.get_traces().size();
         stager.push(DISPATCH_BUFFER[idx], sim_stats);
+        if (fill_mode != fill_mode_type::OFF && stager.get_traces().size() > before) {
+          const auto& t = stager.get_traces().back();
+          fill_store.insert(t.entry, t.ips);
+        }
       }
     }
   }
@@ -482,6 +543,31 @@ long O3_CPU::dispatch_instruction()
 
     available_dispatch_bandwidth.consume();
     ROB.back().ready_time = current_time + (warmup ? champsim::chrono::clock::duration{} : SCHEDULING_LATENCY);
+  }
+
+  // frontend IPC-loss accounting: a cycle where nothing dispatched and the front
+  // end had no ready instruction to give, while in BUILD mode -- i.e. the stall is
+  // attributable to a u-op-cache miss (not a backend structural stall, and not the
+  // branch-mispredict fetch penalty itself).  Two bounds, each split recovery vs
+  // steady:  fe_stall_* = ROB had room (dispatch starvation, upper bound on IPC
+  // loss); rob_idle_* = ROB fully empty (backend idle, tight lower bound that
+  // reconciles with the real->ideal gap).
+  if (available_dispatch_bandwidth.amount_consumed() == 0 && fetch_mode == fetch_mode_type::BUILD
+      && (std::empty(DISPATCH_BUFFER) || DISPATCH_BUFFER.front().ready_time > current_time)) {
+    if (std::size(ROB) != ROB_SIZE) {
+      if (in_recovery) {
+        ++sim_stats.fe_stall_recovery;
+      } else {
+        ++sim_stats.fe_stall_steady;
+      }
+    }
+    if (std::empty(ROB)) {
+      if (in_recovery) {
+        ++sim_stats.rob_idle_recovery;
+      } else {
+        ++sim_stats.rob_idle_steady;
+      }
+    }
   }
 
   return available_dispatch_bandwidth.amount_consumed();
@@ -703,6 +789,8 @@ void O3_CPU::do_complete_execution(ooo_model_instr& instr)
 
   if (instr.branch_mispredicted) {
     fetch_resume_time = current_time + BRANCH_MISPREDICT_PENALTY;
+    do_flush_fill(instr); // FLUSH mode: warm the recovery path
+    in_recovery = true;   // frontend now refilling the recovery path
   }
 }
 

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <unordered_set>
 #include <vector>
 
 #include "address.h"
@@ -28,6 +29,11 @@ class micro_op_cache
 public:
   static constexpr int MAX_BRANCHES_PER_ENTRY = 2;
 
+  // "ideal" DIB knob modes:
+  static constexpr int IDEAL_OFF = 0;       // normal finite set-associative cache
+  static constexpr int IDEAL_ORACLE = 1;    // every lookup hits (paper's IDEAL_UOP_CACHE upper bound)
+  static constexpr int IDEAL_COLD_MISS = 2; // infinite capacity: first access to a window misses, then always hits
+
   struct entry {
     uint64_t tag = 0;
     bool valid = false;
@@ -37,7 +43,7 @@ public:
     uint64_t last_used = 0;          // LRU timestamp
   };
 
-  micro_op_cache(std::size_t sets, std::size_t ways, champsim::data::bits window_bits, bool ideal = false)
+  micro_op_cache(std::size_t sets, std::size_t ways, champsim::data::bits window_bits, int ideal = IDEAL_OFF)
       : NUM_SET(sets), NUM_WAY(ways), window_shift(window_bits), ideal_(ideal), block(sets * ways)
   {
   }
@@ -45,8 +51,10 @@ public:
   // stream-mode lookup: hit on any matching window tag (tag-only, as in UCP).
   bool check_hit(champsim::address ip)
   {
-    if (ideal_) // ideal u-op cache: every lookup hits (perfect-DIB upper bound)
+    if (ideal_ == IDEAL_ORACLE) // every lookup hits (perfect-DIB upper bound)
       return true;
+    if (ideal_ == IDEAL_COLD_MISS) // infinite capacity: hit iff this window was decoded before
+      return seen_.count(tag_of(ip)) != 0;
     if (block.empty()) // disabled (no u-op cache: sets==0 or ways==0)
       return false;
     auto t = tag_of(ip);
@@ -63,6 +71,12 @@ public:
   // build-mode fill: replicates UCP Insert() entry-termination semantics.
   void fill(champsim::address ip, bool taken_end, bool is_branch)
   {
+    if (ideal_ == IDEAL_ORACLE) // nothing to store: every lookup already hits
+      return;
+    if (ideal_ == IDEAL_COLD_MISS) { // infinite capacity, never evict: mark this window decoded
+      seen_.insert(tag_of(ip));
+      return;
+    }
     if (block.empty()) // disabled (no u-op cache)
       return;
     auto t = tag_of(ip);
@@ -106,11 +120,39 @@ public:
     }
   }
 
+  // trace-fill (option a): pre-install a trace's windows so later fetches hit.
+  // Marks each distinct aligned window present (a build with no termination).
+  // Returns the number of distinct windows touched.
+  std::size_t install(const std::vector<uint64_t>& ips)
+  {
+    // oracle: nothing to install (all hits); off with no cache: nothing to do.
+    // cold-miss falls through and marks windows decoded via fill() -> seen_.
+    if (ideal_ == IDEAL_ORACLE || (ideal_ == IDEAL_OFF && block.empty())) {
+      return 0;
+    }
+    std::size_t windows = 0;
+    uint64_t last = 0;
+    bool have_last = false;
+    for (uint64_t raw : ips) {
+      const champsim::address ip{raw};
+      const uint64_t t = tag_of(ip);
+      if (have_last && t == last) {
+        continue; // same window as the previous u-op
+      }
+      have_last = true;
+      last = t;
+      fill(ip, false, false); // insert/refresh -> window present
+      ++windows;
+    }
+    return windows;
+  }
+
 private:
   std::size_t NUM_SET;
   std::size_t NUM_WAY;
   champsim::data::bits window_shift;
-  bool ideal_;
+  int ideal_;                          // IDEAL_OFF / IDEAL_ORACLE / IDEAL_COLD_MISS
+  std::unordered_set<uint64_t> seen_;  // windows ever decoded (IDEAL_COLD_MISS only)
   std::vector<entry> block;
   uint64_t lru_clock = 0;
 

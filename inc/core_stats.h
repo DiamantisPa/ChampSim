@@ -17,6 +17,19 @@ struct cpu_stats {
   uint64_t switch_stalls = 0;    // u-op-cache stream<->build mode-switch stalls
   uint64_t uop_cache_reads = 0;  // u-op-cache lookups (one per instruction checked)
   uint64_t uop_cache_hits = 0;   // u-op-cache lookups that hit
+  uint64_t uop_trace_fill_hits = 0;    // u-op-cache misses served by trace-fill (option a)
+  uint64_t uop_trace_fill_windows = 0; // windows installed by trace-fill
+
+  // frontend IPC-loss decomposition (real u-op cache vs ideal). Misses split by
+  // whether they occur post-misprediction (recovery refill) or on the correct
+  // path (steady state); fe_stall_* are dispatch-starvation cycles in BUILD mode
+  // (u-op-miss-attributable, branch penalty excluded), same split.
+  uint64_t uop_miss_steady = 0;    // u-op-cache misses on the correct path
+  uint64_t uop_miss_recovery = 0;  // u-op-cache misses while recovering from a misprediction
+  uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
+  uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
+  uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)
+  uint64_t rob_idle_recovery = 0;  // build-mode cycles with ROB fully empty, post-misprediction (tight lower bound)
 
   // trace segmentation (see inc/trace_segmenter.h)
   uint64_t seg_traces_loop = 0;              // stored traces triggered by backward branches

@@ -10,6 +10,14 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.switch_stalls -= rhs.switch_stalls;
   lhs.uop_cache_reads -= rhs.uop_cache_reads;
   lhs.uop_cache_hits -= rhs.uop_cache_hits;
+  lhs.uop_trace_fill_hits -= rhs.uop_trace_fill_hits;
+  lhs.uop_trace_fill_windows -= rhs.uop_trace_fill_windows;
+  lhs.uop_miss_steady -= rhs.uop_miss_steady;
+  lhs.uop_miss_recovery -= rhs.uop_miss_recovery;
+  lhs.fe_stall_steady -= rhs.fe_stall_steady;
+  lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
+  lhs.rob_idle_steady -= rhs.rob_idle_steady;
+  lhs.rob_idle_recovery -= rhs.rob_idle_recovery;
 
   lhs.seg_traces_loop -= rhs.seg_traces_loop;
   lhs.seg_traces_function -= rhs.seg_traces_function;

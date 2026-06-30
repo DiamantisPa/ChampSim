@@ -29,7 +29,8 @@
       "execute_latency": 0,
       "branch_predictor": "tage_sc_l",
       "btb": "basic_btb",
-      "trace_builder": "off"
+      "trace_builder": "off",
+      "trace_fill": "off"
     }
   ],
   "DIB": {

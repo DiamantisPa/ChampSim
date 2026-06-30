@@ -29,6 +29,7 @@ queue_fmtstr = '{rq_size}, {pq_size}, {wq_size}, champsim::data::bits{{{_offset_
 
 core_builder_parts = {
     'trace_builder': '.trace_builder("{trace_builder}")',
+    'trace_fill': '.trace_fill("{trace_fill}")',
     'ifetch_buffer_size': '.ifetch_buffer_size({ifetch_buffer_size})',
     'decode_buffer_size': '.decode_buffer_size({decode_buffer_size})',
     'dispatch_buffer_size': '.dispatch_buffer_size({dispatch_buffer_size})',

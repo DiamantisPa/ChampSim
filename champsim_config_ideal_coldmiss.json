@@ -1,5 +1,5 @@
 {
-  "executable_name": "champsim_ideal_uop",
+  "executable_name": "champsim_ideal_coldmiss",
   "block_size": 64,
   "page_size": 4096,
   "heartbeat_frequency": 10000000,
@@ -37,7 +37,7 @@
     "window_size": 32,
     "sets": 128,
     "ways": 8,
-    "ideal": 1,
+    "ideal": 2,
     "inorder_width": 8
   },
   "L1I": {

@@ -41,8 +41,9 @@ struct core_builder_base {
   std::size_t m_dib_set{1};
   std::size_t m_dib_way{1};
   std::size_t m_dib_window{1};
-  bool m_dib_ideal{false}; // ideal u-op cache: every lookup hits (perfect-DIB upper bound)
+  int m_dib_ideal{0}; // ideal u-op cache mode: 0=off, 1=oracle (always hit), 2=cold-miss (infinite capacity)
   std::string m_trace_builder{"both"}; // Prometheus trace builder: both/backward/forward/off
+  std::string m_trace_fill{"off"};     // Prometheus trace-fill mode: off/miss/every/window
   std::size_t m_ifetch_buffer_size{1};
   std::size_t m_decode_buffer_size{1};
   std::size_t m_dispatch_buffer_size{1};
@@ -118,15 +119,25 @@ public:
   self_type& dib_window(std::size_t dib_window_);
 
   /**
-   * Make the Decoded Instruction Buffer (u-op cache) ideal: every lookup hits.
+   * Decoded Instruction Buffer (u-op cache) ideal mode: 0=off, 1=oracle (every
+   * lookup hits), 2=cold-miss (infinite capacity; first access to a window misses,
+   * then always hits).
    */
-  self_type& dib_ideal(bool dib_ideal_);
+  self_type& dib_ideal(int dib_ideal_);
 
   /**
    * Select which Prometheus trace builder(s) observe the post-merge u-op
    * stream: "both" (default), "backward"/"seg", "forward"/"rec", or "off".
    */
   self_type& trace_builder(std::string trace_builder_);
+
+  /**
+   * Trace-fill mode: install stored traces into the u-op cache.  "off" disables;
+   * "miss" fills on a miss at a trace entry; "every" fills on hit-or-miss at a
+   * trace entry; "window" fills on a miss anywhere in a trace's footprint.  Any
+   * non-off mode forces the staging builder on to feed the trace cache.
+   */
+  self_type& trace_fill(std::string trace_fill_);
 
   /**
    * Specify the maximum size of the instruction fetch buffer.
@@ -320,7 +331,7 @@ auto champsim::core_builder<B, T>::dib_window(std::size_t dib_window_) -> self_t
 }
 
 template <typename B, typename T>
-auto champsim::core_builder<B, T>::dib_ideal(bool dib_ideal_) -> self_type&
+auto champsim::core_builder<B, T>::dib_ideal(int dib_ideal_) -> self_type&
 {
   m_dib_ideal = dib_ideal_;
   return *this;
@@ -330,6 +341,13 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_builder(std::string trace_builder_) -> self_type&
 {
   m_trace_builder = std::move(trace_builder_);
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_fill(std::string trace_fill_) -> self_type&
+{
+  m_trace_fill = std::move(trace_fill_);
   return *this;
 }
 

@@ -50,6 +50,7 @@
 #include "trace_recorder.h"
 #include "trace_segmenter.h"
 #include "trace_stager.h"
+#include "trace_store.h"
 #include "util/lru_table.h"
 #include "util/to_underlying.h"
 
@@ -119,6 +120,11 @@ public:
   enum class fetch_mode_type { STREAM, BUILD };
   fetch_mode_type fetch_mode{fetch_mode_type::STREAM};
 
+  // frontend IPC-loss decomposition: true from a branch-misprediction recovery
+  // until the front end is back to streaming (first u-op-cache hit). Used to
+  // bucket u-op misses / build-mode stalls as recovery vs steady-state.
+  bool in_recovery{false};
+
   // Prometheus trace builders, fed from the post-merge u-op stream, run in
   // parallel so their coverage/trace stats can be diffed (seg_* / rec_* / stg_*):
   //   * segmenter -- backward oracle (512-ring + backward walk; not synthesizable)
@@ -130,6 +136,41 @@ public:
   bool trace_seg_enable{true};  // run the backward segmenter (resolved in ctor)
   bool trace_rec_enable{true};  // run the forward recorder   (resolved in ctor)
   bool trace_stg_enable{false}; // run the staging builder    (resolved in ctor)
+
+  // Trace-fill: a bounded trace cache fed by the stager; on the appropriate
+  // u-op-cache event install the trace's windows.  Mode set by "trace_fill"
+  // config / PROMETHEUS_TRACE_FILL env (forces the stager on). See do_check_dib().
+  //   OFF    - disabled
+  //   MISS   - fill on a miss at a trace entry PC                  (option a)
+  //   EVERY  - fill on hit-or-miss at a trace entry PC
+  //   WINDOW - fill on a miss anywhere in a trace's footprint      (window-indexed)
+  //   FLUSH  - fill on a branch misprediction, window-matched at the recovery PC
+  //            (no demand fill; the UCP-style "fast refill" trigger)
+  enum class fill_mode_type { OFF, MISS, EVERY, WINDOW, FLUSH };
+  trace_store fill_store{};
+  fill_mode_type fill_mode{fill_mode_type::OFF};
+
+  // Resolve the trace-fill mode from the "trace_fill" config field, overridden
+  // by PROMETHEUS_TRACE_FILL when set.  Accepts off/miss/every/window (and the
+  // legacy 0/1 -> off/miss for back-compat).
+  static fill_mode_type resolve_fill_mode(const std::string& cfg)
+  {
+    const char* e = std::getenv("PROMETHEUS_TRACE_FILL");
+    const std::string v = (e != nullptr && *e != '\0') ? std::string{e} : cfg;
+    if (v == "every") {
+      return fill_mode_type::EVERY;
+    }
+    if (v == "window") {
+      return fill_mode_type::WINDOW;
+    }
+    if (v == "flush") {
+      return fill_mode_type::FLUSH;
+    }
+    if (v == "miss" || v == "1") {
+      return fill_mode_type::MISS;
+    }
+    return fill_mode_type::OFF; // "off", "0", "" or anything else
+  }
 
   // Resolve which trace builder(s) run from the "trace_builder" config field,
   // overridden by the PROMETHEUS_TRACE env var when set.  Returns {seg, rec, stg}.
@@ -201,6 +242,7 @@ public:
   bool do_init_instruction(ooo_model_instr& instr);
   bool do_predict_branch(ooo_model_instr& instr);
   void do_check_dib(ooo_model_instr& instr);
+  void do_flush_fill(const ooo_model_instr& branch); // FLUSH mode: install recovery-PC trace on a mispredict
   void finalize_coverage_stats(); // end-of-phase: derived trace-coverage attribution
   bool do_fetch_instruction(std::deque<ooo_model_instr>::iterator begin, std::deque<ooo_model_instr>::iterator end);
   void do_dib_update(const ooo_model_instr& instr);
@@ -288,6 +330,12 @@ public:
         btb_module_pimpl(std::make_unique<btb_module_model<Ts...>>(this))
   {
     std::tie(trace_seg_enable, trace_rec_enable, trace_stg_enable) = resolve_trace_builder(b.m_trace_builder);
+    fill_mode = resolve_fill_mode(b.m_trace_fill);
+    if (fill_mode != fill_mode_type::OFF) {
+      trace_stg_enable = true; // trace-fill is fed by the stager
+      const bool window_indexed = (fill_mode == fill_mode_type::WINDOW || fill_mode == fill_mode_type::FLUSH);
+      fill_store.configure(static_cast<unsigned>(champsim::lg2(b.m_dib_window)), window_indexed);
+    }
   }
 };
 

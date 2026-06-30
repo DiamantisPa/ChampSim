@@ -64,6 +64,23 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.uop_cache_hits, stats.uop_cache_reads,
                               ::print_ratio(std::kilo::num * static_cast<long long>(stats.uop_cache_reads - stats.uop_cache_hits), stats.instrs())));
 
+  lines.push_back(fmt::format("{} trace-fill(option-a): hits {} windows-installed {} (of {} uop-cache reads, {} hits total)", stats.name,
+                              stats.uop_trace_fill_hits, stats.uop_trace_fill_windows, stats.uop_cache_reads, stats.uop_cache_hits));
+
+  // frontend IPC-loss decomposition: u-op misses and build-mode dispatch-starvation
+  // cycles, split by correct-path (steady) vs post-misprediction (recovery).
+  const auto fe_misses = stats.uop_cache_reads - stats.uop_cache_hits;
+  const auto fe_stall_total = stats.fe_stall_steady + stats.fe_stall_recovery + stats.switch_stalls;
+  lines.push_back(fmt::format("{} frontend-loss misses: steady {} recovery {} (of {} total misses)", stats.name, stats.uop_miss_steady,
+                              stats.uop_miss_recovery, fe_misses));
+  lines.push_back(fmt::format("{} frontend-loss stall-cycles (upper): steady {} recovery {} switch {} | total {} ({}% of {} cycles)", stats.name,
+                              stats.fe_stall_steady, stats.fe_stall_recovery, stats.switch_stalls, fe_stall_total,
+                              ::print_ratio(100 * static_cast<long long>(fe_stall_total), stats.cycles()), stats.cycles()));
+  const auto rob_idle_total = stats.rob_idle_steady + stats.rob_idle_recovery;
+  lines.push_back(fmt::format("{} frontend-loss backend-idle (tight): steady {} recovery {} | total {} ({}% of {} cycles)", stats.name,
+                              stats.rob_idle_steady, stats.rob_idle_recovery, rob_idle_total,
+                              ::print_ratio(100 * static_cast<long long>(rob_idle_total), stats.cycles()), stats.cycles()));
+
   lines.push_back(fmt::format("{} trace-seg: loop {} function {} dedup-hits {} entangled {} dropped: bad-layout {} overflow {} short {} stored-uops {} invariant-violations {}",
                               stats.name, stats.seg_traces_loop, stats.seg_traces_function, stats.seg_traces_dedup, stats.seg_traces_entangled,
                               stats.seg_traces_dropped_bad_layout, stats.seg_traces_dropped_overflow, stats.seg_traces_dropped_short,
