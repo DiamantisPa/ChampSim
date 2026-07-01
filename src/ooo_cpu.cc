@@ -274,11 +274,20 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     fetch_mode = fetch_mode_type::STREAM;
     in_recovery = false; // back to streaming: the misprediction refill is complete
   } else {
-    // genuine u-op-cache miss -> build mode. Bucket it as recovery vs steady-state.
+    // genuine u-op-cache miss -> build mode. Bucket it as recovery vs steady-state,
+    // and sub-count whether the missing IP is covered by a stored trace (the
+    // ceiling for what trace-fill could serve).
+    const bool traced = trace_stg_enable && stager.covers(instr.ip.to<uint64_t>());
     if (in_recovery) {
       ++sim_stats.uop_miss_recovery;
+      if (traced) {
+        ++sim_stats.uop_miss_recovery_traced;
+      }
     } else {
       ++sim_stats.uop_miss_steady;
+      if (traced) {
+        ++sim_stats.uop_miss_steady_traced;
+      }
     }
     if (fetch_mode == fetch_mode_type::STREAM) {
       // stream -> build switch on the first miss: pay a 1-cycle fetch stall

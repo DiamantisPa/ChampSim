@@ -19,7 +19,7 @@ import re
 RE_IPC = re.compile(r'^CPU \d+ cumulative IPC:\s+([\d.]+)\s+instructions:\s+(\d+)\s+cycles:\s+(\d+)', re.M)
 RE_HIT = re.compile(r'uop-cache hit rate:\s+([\d.]+)%', re.M)
 RE_SWITCH = re.compile(r'uop-cache mode-switch stalls:\s+\d+\s+MPKI:\s+([\d.]+)', re.M)
-RE_MISS = re.compile(r'frontend-loss misses: steady (\d+) recovery (\d+) \(of (\d+) total', re.M)
+RE_MISS = re.compile(r'frontend-loss misses: steady (\d+) \(traced (\d+)\) recovery (\d+) \(traced (\d+)\) \(of (\d+) total', re.M)
 RE_UPPER = re.compile(r'frontend-loss stall-cycles \(upper\): steady (\d+) recovery (\d+) switch (\d+) \| total (\d+)', re.M)
 RE_TIGHT = re.compile(r'frontend-loss backend-idle \(tight\): steady (\d+) recovery (\d+) \| total (\d+)', re.M)
 
@@ -40,7 +40,9 @@ def parse_file(path):
 
     mm = RE_MISS.search(txt)
     if mm:
-        d['miss_steady'], d['miss_recovery'], d['miss_total'] = int(mm.group(1)), int(mm.group(2)), int(mm.group(3))
+        d['miss_steady'], d['miss_steady_traced'] = int(mm.group(1)), int(mm.group(2))
+        d['miss_recovery'], d['miss_recovery_traced'] = int(mm.group(3)), int(mm.group(4))
+        d['miss_total'] = int(mm.group(5))
     up = RE_UPPER.search(txt)
     if up:
         d['up_steady'], d['up_recovery'], d['up_switch'], d['up_total'] = (int(up.group(i)) for i in range(1, 5))
@@ -87,23 +89,40 @@ def aggregate(path, pattern, include):
     print(f"hit rate:     {amean([r['hit'] for r in rows]):.2f}%")
     print(f"switch MPKI:  {amean([r['switch_mpki'] for r in rows]):.3f}")
 
-    # frontend-loss decomposition: average each simpoint's percentages (equal weight),
-    # and also report the summed (cycle-weighted) split.
     have_fe = [r for r in rows if 'ti_total' in r]
-    if have_fe:
-        miss_share = amean([pct(r['miss_recovery'], r['miss_total']) for r in have_fe if r.get('miss_total')])
-        up_pct = amean([pct(r['up_total'], r['cycles']) for r in have_fe])
-        up_share = amean([pct(r['up_recovery'], r['up_steady'] + r['up_recovery']) for r in have_fe if (r['up_steady'] + r['up_recovery'])])
-        ti_pct = amean([pct(r['ti_total'], r['cycles']) for r in have_fe])
-        ti_share = amean([pct(r['ti_recovery'], r['ti_total']) for r in have_fe if r['ti_total']])
-        # cycle-weighted (summed) tight split across all simpoints
-        sum_ti_s = sum(r['ti_steady'] for r in have_fe)
-        sum_ti_r = sum(r['ti_recovery'] for r in have_fe)
-        print("--- frontend-loss decomposition (avg over simpoints) ---")
-        print(f"  misses:                  recovery {miss_share:.1f}% of total misses")
-        print(f"  dispatch-starve (upper): {up_pct:.2f}% of cycles   (recovery {up_share:.1f}% of steady+recovery)")
-        print(f"  backend-idle   (tight):  {ti_pct:.2f}% of cycles   (recovery {ti_share:.1f}% of total)")
-        print(f"  tight, cycle-weighted:   recovery {pct(sum_ti_r, sum_ti_s + sum_ti_r):.1f}% of total backend-idle cycles")
+    if not have_fe:
+        return
+    print("\n--- frontend-loss decomposition (averaged per simpoint) ---")
+
+    # u-op-cache misses (absolute count + steady/recovery split + trace-fill ceiling)
+    miss_abs = amean([r['miss_total'] for r in have_fe])
+    miss_rec = amean([pct(r['miss_recovery'], r['miss_total']) for r in have_fe if r.get('miss_total')])
+    miss_ste = amean([pct(r['miss_steady'], r['miss_total']) for r in have_fe if r.get('miss_total')])
+    tr_ste = amean([pct(r['miss_steady_traced'], r['miss_steady']) for r in have_fe if r.get('miss_steady')])
+    tr_rec = amean([pct(r['miss_recovery_traced'], r['miss_recovery']) for r in have_fe if r.get('miss_recovery')])
+    print(f"muop cache misses:               {miss_abs:,.0f}")
+    print(f"  recovery %:                    {miss_rec:.1f}%")
+    print(f"  steady %:                      {miss_ste:.1f}%")
+    print(f"  trace-covered (fill ceiling):  steady {tr_ste:.1f}%   recovery {tr_rec:.1f}%")
+
+    # dispatch-starve (upper bound): steady+recovery dispatch-starvation cycles
+    up_abs = amean([r['up_steady'] + r['up_recovery'] for r in have_fe])
+    up_sw = amean([r['up_switch'] for r in have_fe])
+    up_pct = amean([pct(r['up_steady'] + r['up_recovery'], r['cycles']) for r in have_fe])
+    up_ste = amean([pct(r['up_steady'], r['up_steady'] + r['up_recovery']) for r in have_fe if (r['up_steady'] + r['up_recovery'])])
+    up_rec = amean([pct(r['up_recovery'], r['up_steady'] + r['up_recovery']) for r in have_fe if (r['up_steady'] + r['up_recovery'])])
+    print(f"dispatch-starve (upper):         {up_abs:,.0f} cycles   ({up_pct:.2f}% of runtime; +{up_sw:,.0f} switch)")
+    print(f"  steady %:                      {up_ste:.1f}%")
+    print(f"  recovery %:                    {up_rec:.1f}%")
+
+    # backend-idle (tight bound): ROB fully empty in build mode
+    ti_abs = amean([r['ti_total'] for r in have_fe])
+    ti_pct = amean([pct(r['ti_total'], r['cycles']) for r in have_fe])
+    ti_ste = amean([pct(r['ti_steady'], r['ti_total']) for r in have_fe if r['ti_total']])
+    ti_rec = amean([pct(r['ti_recovery'], r['ti_total']) for r in have_fe if r['ti_total']])
+    print(f"backend-idle (tight):            {ti_abs:,.0f} cycles   ({ti_pct:.2f}% of runtime)")
+    print(f"  steady %:                      {ti_ste:.1f}%")
+    print(f"  recovery %:                    {ti_rec:.1f}%")
 
 
 def main():

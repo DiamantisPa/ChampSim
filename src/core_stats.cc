@@ -14,6 +14,8 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.uop_trace_fill_windows -= rhs.uop_trace_fill_windows;
   lhs.uop_miss_steady -= rhs.uop_miss_steady;
   lhs.uop_miss_recovery -= rhs.uop_miss_recovery;
+  lhs.uop_miss_steady_traced -= rhs.uop_miss_steady_traced;
+  lhs.uop_miss_recovery_traced -= rhs.uop_miss_recovery_traced;
   lhs.fe_stall_steady -= rhs.fe_stall_steady;
   lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
   lhs.rob_idle_steady -= rhs.rob_idle_steady;

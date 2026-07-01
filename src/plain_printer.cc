@@ -71,8 +71,8 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
   // cycles, split by correct-path (steady) vs post-misprediction (recovery).
   const auto fe_misses = stats.uop_cache_reads - stats.uop_cache_hits;
   const auto fe_stall_total = stats.fe_stall_steady + stats.fe_stall_recovery + stats.switch_stalls;
-  lines.push_back(fmt::format("{} frontend-loss misses: steady {} recovery {} (of {} total misses)", stats.name, stats.uop_miss_steady,
-                              stats.uop_miss_recovery, fe_misses));
+  lines.push_back(fmt::format("{} frontend-loss misses: steady {} (traced {}) recovery {} (traced {}) (of {} total misses)", stats.name,
+                              stats.uop_miss_steady, stats.uop_miss_steady_traced, stats.uop_miss_recovery, stats.uop_miss_recovery_traced, fe_misses));
   lines.push_back(fmt::format("{} frontend-loss stall-cycles (upper): steady {} recovery {} switch {} | total {} ({}% of {} cycles)", stats.name,
                               stats.fe_stall_steady, stats.fe_stall_recovery, stats.switch_stalls, fe_stall_total,
                               ::print_ratio(100 * static_cast<long long>(fe_stall_total), stats.cycles()), stats.cycles()));

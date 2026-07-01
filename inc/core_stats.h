@@ -26,6 +26,10 @@ struct cpu_stats {
   // (u-op-miss-attributable, branch penalty excluded), same split.
   uint64_t uop_miss_steady = 0;    // u-op-cache misses on the correct path
   uint64_t uop_miss_recovery = 0;  // u-op-cache misses while recovering from a misprediction
+  // ... of which the missing IP is covered by a stored trace (the stager): the
+  // ceiling for what trace-fill could serve. Subset of the two counters above.
+  uint64_t uop_miss_steady_traced = 0;
+  uint64_t uop_miss_recovery_traced = 0;
   uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)
