@@ -103,6 +103,9 @@ void O3_CPU::finalize_coverage_stats()
   if (trace_stg_enable) {
     stager.finalize_coverage(sim_stats);
   }
+  if (trace_stall_enable) {
+    stall.finalize_buckets(sim_stats);
+  }
 
   // cross-builder dynamic-weighted diffs: the dynamic stream is identical across
   // builders, so iterate any enabled builder's dyn_counts and compare covered sets
@@ -277,7 +280,8 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     // genuine u-op-cache miss -> build mode. Bucket it as recovery vs steady-state,
     // and sub-count whether the missing IP is covered by a stored trace (the
     // ceiling for what trace-fill could serve).
-    const bool traced = trace_stg_enable && stager.covers(instr.ip.to<uint64_t>());
+    const uint64_t rawip = instr.ip.to<uint64_t>();
+    const bool traced = (trace_stg_enable && stager.covers(rawip)) || (trace_stall_enable && stall.covers(rawip));
     if (in_recovery) {
       ++sim_stats.uop_miss_recovery;
       if (traced) {
@@ -297,6 +301,12 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
       }
       ++sim_stats.switch_stalls;
     }
+  }
+
+  // stall-triggered segmenter: feed the fetch stream (hit closes/commits a costly
+  // build-mode stretch; miss extends the current one). See inc/trace_stall.h.
+  if (trace_stall_enable && !warmup) {
+    stall.on_dib(instr.ip.to<uint64_t>(), hit, sim_stats);
   }
 
   instr.dib_checked = true;
@@ -575,6 +585,10 @@ long O3_CPU::dispatch_instruction()
         ++sim_stats.rob_idle_recovery;
       } else {
         ++sim_stats.rob_idle_steady;
+      }
+      // the ROB drained empty in build mode: mark the in-flight stall stretch costly
+      if (trace_stall_enable && !warmup) {
+        stall.note_rob_empty();
       }
     }
   }

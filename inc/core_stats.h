@@ -1,6 +1,7 @@
 #ifndef CORE_STATS_H
 #define CORE_STATS_H
 
+#include <array>
 #include <cstdint>
 #include <string>
 
@@ -30,6 +31,28 @@ struct cpu_stats {
   // ceiling for what trace-fill could serve. Subset of the two counters above.
   uint64_t uop_miss_steady_traced = 0;
   uint64_t uop_miss_recovery_traced = 0;
+
+  // stall-triggered segmenter (see inc/trace_stall.h): traces recorded across a
+  // build-mode stretch that drained the ROB (a costly backend-idle stall).
+  uint64_t stall_traces = 0;              // distinct traces committed (keyed by stretch-start IP)
+  uint64_t stall_dedup = 0;              // costly stretches whose start IP was already captured
+  uint64_t stall_stored_uops = 0;
+  uint64_t stall_dynamic_uops = 0;
+  uint64_t stall_dynamic_uops_covered = 0;
+  uint64_t stall_unique_ips_seen = 0;
+  uint64_t stall_unique_ips_covered = 0;
+  // Pareto view of stall traces: dynamic weight (occurrences x length) captured by
+  // the top-N traces, ranked by occurrence and by dynamic weight.  Cumulative; as a
+  // fraction of stall_total_dynweight these say "keep N traces -> capture X%".
+  uint64_t stall_total_dynweight = 0;
+  uint64_t stall_occ_top16 = 0, stall_occ_top32 = 0, stall_occ_top64 = 0, stall_occ_top128 = 0;
+  uint64_t stall_occ_top256 = 0, stall_occ_top512 = 0, stall_occ_top1024 = 0;
+  uint64_t stall_cov_top16 = 0, stall_cov_top32 = 0, stall_cov_top64 = 0, stall_cov_top128 = 0;
+  uint64_t stall_cov_top256 = 0, stall_cov_top512 = 0, stall_cov_top1024 = 0;
+  // per bucket {16,32,64,128,256,512,1024}: avg occurrence and avg length of the
+  // top-N traces, ranked by occurrence and by coverage (dyn-weight).
+  std::array<double, 7> stall_occ_avgocc{}, stall_occ_avglen{}; // by-occurrence ranking
+  std::array<double, 7> stall_cov_avgocc{}, stall_cov_avglen{}; // by-coverage ranking
   uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)

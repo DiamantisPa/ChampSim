@@ -50,6 +50,7 @@
 #include "trace_recorder.h"
 #include "trace_segmenter.h"
 #include "trace_stager.h"
+#include "trace_stall.h"
 #include "trace_store.h"
 #include "util/lru_table.h"
 #include "util/to_underlying.h"
@@ -133,9 +134,11 @@ public:
   trace_segmenter segmenter{};
   trace_recorder recorder{};
   trace_stager stager{};
+  trace_stall stall{};
   bool trace_seg_enable{true};  // run the backward segmenter (resolved in ctor)
   bool trace_rec_enable{true};  // run the forward recorder   (resolved in ctor)
-  bool trace_stg_enable{false}; // run the staging builder    (resolved in ctor)
+  bool trace_stg_enable{false};   // run the staging builder    (resolved in ctor)
+  bool trace_stall_enable{false}; // run the stall-triggered segmenter (trace_builder "stall"/"all")
 
   // Trace-fill: a bounded trace cache fed by the stager; on the appropriate
   // u-op-cache event install the trace's windows.  Mode set by "trace_fill"
@@ -330,6 +333,11 @@ public:
         btb_module_pimpl(std::make_unique<btb_module_model<Ts...>>(this))
   {
     std::tie(trace_seg_enable, trace_rec_enable, trace_stg_enable) = resolve_trace_builder(b.m_trace_builder);
+    {
+      const char* e = std::getenv("PROMETHEUS_TRACE");
+      const std::string v = (e != nullptr && *e != '\0') ? std::string{e} : b.m_trace_builder;
+      trace_stall_enable = (v == "stall" || v == "all");
+    }
     fill_mode = resolve_fill_mode(b.m_trace_fill);
     if (fill_mode != fill_mode_type::OFF) {
       trace_stg_enable = true; // trace-fill is fed by the stager
