@@ -17,6 +17,7 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.uop_miss_steady_traced -= rhs.uop_miss_steady_traced;
   lhs.uop_miss_recovery_traced -= rhs.uop_miss_recovery_traced;
   lhs.stall_traces -= rhs.stall_traces;
+  lhs.stall_traces_candidates -= rhs.stall_traces_candidates;
   lhs.stall_dedup -= rhs.stall_dedup;
   lhs.stall_stored_uops -= rhs.stall_stored_uops;
   lhs.stall_dynamic_uops -= rhs.stall_dynamic_uops;
@@ -43,7 +44,20 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
     lhs.stall_occ_avglen[i] -= rhs.stall_occ_avglen[i];
     lhs.stall_cov_avgocc[i] -= rhs.stall_cov_avgocc[i];
     lhs.stall_cov_avglen[i] -= rhs.stall_cov_avglen[i];
+    lhs.stall_cost_cum[i] -= rhs.stall_cost_cum[i];
+    lhs.stall_cost_cumw[i] -= rhs.stall_cost_cumw[i];
+    lhs.stall_cost_avgocc[i] -= rhs.stall_cost_avgocc[i];
+    lhs.stall_cost_avglen[i] -= rhs.stall_cost_avglen[i];
+    lhs.stall_occ_cumcost[i] -= rhs.stall_occ_cumcost[i];
+    lhs.stall_cov_cumcost[i] -= rhs.stall_cov_cumcost[i];
   }
+  lhs.stall_total_cost -= rhs.stall_total_cost;
+  lhs.alt_triggers -= rhs.alt_triggers;
+  lhs.alt_drops -= rhs.alt_drops;
+  lhs.alt_installed_windows -= rhs.alt_installed_windows;
+  lhs.alt_late_misses -= rhs.alt_late_misses;
+  lhs.alt_useful_hits -= rhs.alt_useful_hits;
+  lhs.alt_wait_cycles -= rhs.alt_wait_cycles;
   lhs.fe_stall_steady -= rhs.fe_stall_steady;
   lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
   lhs.rob_idle_steady -= rhs.rob_idle_steady;

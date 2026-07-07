@@ -34,7 +34,8 @@ struct cpu_stats {
 
   // stall-triggered segmenter (see inc/trace_stall.h): traces recorded across a
   // build-mode stretch that drained the ROB (a costly backend-idle stall).
-  uint64_t stall_traces = 0;              // distinct traces committed (keyed by stretch-start IP)
+  uint64_t stall_traces = 0;              // distinct traces committed (passed the occurrence filter)
+  uint64_t stall_traces_candidates = 0;   // distinct stretch-start IPs seen (total, before filtering)
   uint64_t stall_dedup = 0;              // costly stretches whose start IP was already captured
   uint64_t stall_stored_uops = 0;
   uint64_t stall_dynamic_uops = 0;
@@ -53,6 +54,23 @@ struct cpu_stats {
   // top-N traces, ranked by occurrence and by coverage (dyn-weight).
   std::array<double, 7> stall_occ_avgocc{}, stall_occ_avglen{}; // by-occurrence ranking
   std::array<double, 7> stall_cov_avgocc{}, stall_cov_avglen{}; // by-coverage ranking
+  // cost-ranked Pareto: traces ranked by the ROB-stall cycles their stretches cost
+  // (note_stall() cycles attributed to each stored trace, summed over re-captures).
+  // "keep the N costliest traces -> capture X% of the stall cycles / Y% of dyn-weight".
+  uint64_t stall_total_cost = 0;              // total ROB-stall cycles attributed to stored traces
+  std::array<uint64_t, 7> stall_cost_cum{};   // cum stall-cycles of the top-N by cost
+  std::array<uint64_t, 7> stall_cost_cumw{};  // cum dyn-weight of the top-N by cost
+  std::array<double, 7> stall_cost_avgocc{}, stall_cost_avglen{}; // by-cost ranking
+  // cross-metric: cum stall-cycles captured by the top-N under the OTHER rankings
+  // (how well occurrence / coverage retention proxies for cost).
+  std::array<uint64_t, 7> stall_occ_cumcost{}, stall_cov_cumcost{};
+  // ALT fill mode (metadata trace cache + timed pre-decode walk at branch decode):
+  uint64_t alt_triggers = 0;          // walks launched (alternate-path PC hit the trace store)
+  uint64_t alt_drops = 0;             // triggers dropped because alt_walk_max walks were in flight
+  uint64_t alt_installed_windows = 0; // u-op-cache windows installed by walks
+  uint64_t alt_late_misses = 0;       // demand misses whose window was in a walk still in flight (too slow)
+  uint64_t alt_useful_hits = 0;       // demand hits on walk-installed windows (walk accuracy numerator)
+  uint64_t alt_wait_cycles = 0;       // fetch-stall cycles waiting for a walk-pending window (hit-under-fill)
   uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)

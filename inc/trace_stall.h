@@ -29,11 +29,25 @@ public:
     uint64_t entry = 0;
     std::vector<uint64_t> ips;
     uint64_t occurrences = 0; // how many times this stretch (start IP) was captured
+    uint64_t cost = 0;        // ROB-stall cycles observed across all captures of this stretch
   };
 
   static constexpr std::size_t DEFAULT_MAX_UOPS = 64;
 
   trace_stall() : max_uops(env_max_uops()) {}
+
+  // occurrence filter: only capture a stretch once its start IP has been seen
+  // >= min_occ times (1 = no filtering).  Prunes one-shot stretches (which can't
+  // be prefetched anyway) so the store holds only the recurring, valuable ones.
+  void configure(int min_occ) { threshold_ = (min_occ < 1) ? 1 : static_cast<uint64_t>(min_occ); }
+
+  // max trace length in u-ops (a build-mode stretch longer than this is truncated).
+  void set_max_uops(int d)
+  {
+    if (d > 0) {
+      max_uops = static_cast<std::size_t>(d);
+    }
+  }
 
   // per instruction at the u-op-cache check (fetch stage).  hit = final DIB hit.
   void on_dib(uint64_t ip, bool hit, cpu_stats& stats)
@@ -60,12 +74,15 @@ public:
     }
   }
 
-  // the ROB was observed fully empty in build mode (the tight backend-idle event):
-  // mark the in-flight stretch as costly, so it will be committed at the next hit.
-  void note_rob_empty()
+  // a costly-enough backend stall was observed in build mode (ROB at/below the
+  // configured threshold): mark the in-flight stretch as costly, so it will be
+  // committed at the next hit.  Called once per stalled cycle, so the count is
+  // the stretch's cost in ROB-stall cycles.
+  void note_stall()
   {
     if (recording) {
       costly = true;
+      ++stretch_cost;
     }
   }
 
@@ -73,30 +90,36 @@ public:
   [[nodiscard]] const std::vector<trace>& get_traces() const { return traces; }
 
   // end-of-run Pareto analysis: cumulative dynamic weight (occurrences x length)
-  // captured by the top-N traces, ranked by occurrence and by dynamic weight.
+  // captured by the top-N traces, ranked by occurrence, by dynamic weight, and by
+  // cost (ROB-stall cycles) -- the cost ranking answers "how small can a store be
+  // if it keeps only the traces whose stretches actually hurt?".
   void finalize_buckets(cpu_stats& stats) const
   {
     const std::size_t n = traces.size();
     std::vector<uint64_t> w(n);
-    uint64_t total = 0;
+    uint64_t total = 0, total_cost = 0;
     for (std::size_t i = 0; i < n; ++i) {
       w[i] = traces[i].occurrences * traces[i].ips.size();
       total += w[i];
+      total_cost += traces[i].cost;
     }
     stats.stall_total_dynweight = total;
+    stats.stall_total_cost = total_cost;
 
     static constexpr std::array<std::size_t, 7> BKT = {16, 32, 64, 128, 256, 512, 1024};
     std::vector<std::size_t> idx(n);
     std::iota(idx.begin(), idx.end(), std::size_t{0});
 
-    // cumulative dyn-weight at each bucket, plus avg occurrence and avg length of
-    // the top-N traces (written into the supplied avgocc/avglen arrays).
-    auto cumulative = [&](const std::vector<std::size_t>& order, std::array<double, 7>& avgocc, std::array<double, 7>& avglen) {
+    // cumulative dyn-weight and stall-cost at each bucket, plus avg occurrence and
+    // avg length of the top-N traces (written into the supplied output arrays).
+    auto cumulative = [&](const std::vector<std::size_t>& order, std::array<uint64_t, 7>& cumcost, std::array<double, 7>& avgocc,
+                          std::array<double, 7>& avglen) {
       std::array<uint64_t, 7> out{};
-      uint64_t run_w = 0, run_occ = 0, run_len = 0;
+      uint64_t run_w = 0, run_occ = 0, run_len = 0, run_cost = 0;
       std::size_t bi = 0;
       auto record = [&](std::size_t cnt) {
         out[bi] = run_w;
+        cumcost[bi] = run_cost;
         const double c = cnt ? static_cast<double>(cnt) : 1.0;
         avgocc[bi] = static_cast<double>(run_occ) / c;
         avglen[bi] = static_cast<double>(run_len) / c;
@@ -106,6 +129,7 @@ public:
         run_w += w[order[k]];
         run_occ += traces[order[k]].occurrences;
         run_len += traces[order[k]].ips.size();
+        run_cost += traces[order[k]].cost;
         while (bi < BKT.size() && (k + 1) >= BKT[bi]) {
           record(k + 1);
         }
@@ -117,9 +141,11 @@ public:
     };
 
     std::sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) { return traces[a].occurrences > traces[b].occurrences; });
-    const auto occ = cumulative(idx, stats.stall_occ_avgocc, stats.stall_occ_avglen);
+    const auto occ = cumulative(idx, stats.stall_occ_cumcost, stats.stall_occ_avgocc, stats.stall_occ_avglen);
     std::sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) { return w[a] > w[b]; });
-    const auto cvg = cumulative(idx, stats.stall_cov_avgocc, stats.stall_cov_avglen);
+    const auto cvg = cumulative(idx, stats.stall_cov_cumcost, stats.stall_cov_avgocc, stats.stall_cov_avglen);
+    std::sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) { return traces[a].cost > traces[b].cost; });
+    stats.stall_cost_cumw = cumulative(idx, stats.stall_cost_cum, stats.stall_cost_avgocc, stats.stall_cost_avglen);
 
     stats.stall_occ_top16 = occ[0], stats.stall_occ_top32 = occ[1], stats.stall_occ_top64 = occ[2], stats.stall_occ_top128 = occ[3];
     stats.stall_occ_top256 = occ[4], stats.stall_occ_top512 = occ[5], stats.stall_occ_top1024 = occ[6];
@@ -134,14 +160,25 @@ private:
       return;
     }
     if (auto it = start_index.find(start_ip); it != start_index.end()) {
-      ++traces[it->second].occurrences; // re-capture of an existing stretch
+      ++traces[it->second].occurrences; // re-capture of an already-stored stretch
+      traces[it->second].cost += stretch_cost;
       ++stats.stall_dedup;
       return;
     }
+    // candidate stretch: accumulate occurrences until it clears the filter threshold
+    auto [pit, inserted] = pending.try_emplace(start_ip);
+    if (inserted) {
+      ++stats.stall_traces_candidates; // first sighting of this stretch-start (unfiltered total)
+    }
+    pit->second.cost += stretch_cost;
+    if (++pit->second.count < threshold_) {
+      return; // filtered out for now -- not recurred enough to capture
+    }
     trace tr;
     tr.entry = start_ip;
-    tr.ips = buf;
-    tr.occurrences = 1;
+    tr.ips = buf; // IPs from the occurrence that clears the threshold
+    tr.occurrences = pit->second.count;
+    tr.cost = pit->second.cost;
     for (uint64_t v : tr.ips) {
       cov.cover(v, stats.stall_unique_ips_covered);
     }
@@ -149,12 +186,14 @@ private:
     ++stats.stall_traces;
     start_index.emplace(start_ip, traces.size());
     traces.push_back(std::move(tr));
+    pending.erase(pit);
   }
 
   void reset()
   {
     recording = false;
     costly = false;
+    stretch_cost = 0;
     buf.clear();
   }
 
@@ -168,13 +207,21 @@ private:
     return DEFAULT_MAX_UOPS;
   }
 
+  struct pend {
+    uint64_t count = 0; // occurrences so far (below threshold)
+    uint64_t cost = 0;  // ROB-stall cycles accrued while still filtered
+  };
+
   std::size_t max_uops;
   bool recording = false;
   bool costly = false;
   uint64_t start_ip = 0;
+  uint64_t stretch_cost = 0; // ROB-stall cycles in the in-flight stretch
   std::vector<uint64_t> buf;
+  uint64_t threshold_ = 1;                               // min occurrences to capture (occurrence filter)
   std::vector<trace> traces;
-  std::unordered_map<uint64_t, std::size_t> start_index; // start IP -> index in traces
+  std::unordered_map<uint64_t, std::size_t> start_index; // start IP -> index in traces (captured)
+  std::unordered_map<uint64_t, pend> pending;            // start IP -> occurrences+cost (below threshold)
   coverage_meter cov;
 };
 

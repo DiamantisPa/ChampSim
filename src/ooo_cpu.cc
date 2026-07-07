@@ -229,23 +229,154 @@ bool O3_CPU::do_init_instruction(ooo_model_instr& arch_instr)
 
 long O3_CPU::check_dib()
 {
+  // ALT trace-fill: advance in-flight pre-decode walks (timed installs) once per cycle
+  if (fill_mode == fill_mode_type::ALT && !alt_walks.empty()) {
+    drain_alt_walks();
+  }
   // scan through IFETCH_BUFFER to find instructions that hit in the decoded instruction buffer
   auto begin = std::find_if(std::begin(IFETCH_BUFFER), std::end(IFETCH_BUFFER), [](const ooo_model_instr& x) { return !x.dib_checked; });
   auto [window_begin, window_end] = champsim::get_span(begin, std::end(IFETCH_BUFFER), champsim::bandwidth{FETCH_WIDTH});
-  std::for_each(window_begin, window_end, [this](auto& ifetch_entry) { this->do_check_dib(ifetch_entry); });
-  return std::distance(window_begin, window_end);
+  long progress{0};
+  for (auto it = window_begin; it != window_end; ++it) {
+    this->do_check_dib(*it);
+    if (!it->dib_checked) {
+      break; // ALT wait-on-pending: fetch stalls here this cycle; younger entries stay in order
+    }
+    ++progress;
+  }
+  return progress;
+}
+
+// ALT trace-fill: install ready windows of in-flight walks, one window per walk per
+// cycle after the base delay (models L1I fetch + pre-decode through idle decode slots).
+void O3_CPU::drain_alt_walks()
+{
+  for (auto& w : alt_walks) {
+    while (w.idx < w.windows.size() && w.ready <= current_time) {
+      // install up to alt_walk_width windows per cycle (pre-decode width)
+      for (int k = 0; k < alt_walk_width && w.idx < w.windows.size(); ++k) {
+        sim_stats.alt_installed_windows += DIB.install(w.windows[w.idx], /*prefetch=*/true);
+        ++w.idx;
+      }
+      w.ready += clock_period;
+    }
+  }
+  alt_walks.erase(std::remove_if(std::begin(alt_walks), std::end(alt_walks), [](const auto& w) { return w.idx >= w.windows.size(); }),
+                  std::end(alt_walks));
+}
+
+// is rawip's window held by an in-flight walk but not yet installed?
+bool O3_CPU::alt_window_pending(uint64_t rawip) const
+{
+  const uint64_t wtag = rawip >> dib_window_bits;
+  for (const auto& w : alt_walks) {
+    for (std::size_t i = w.idx; i < w.windows.size(); ++i) {
+      if ((w.windows[i].front() >> dib_window_bits) == wtag) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ALT trace-fill trigger: a demand u-op-cache miss PC probes the metadata trace
+// cache.  Trace existence is the cost filter -- traces are only captured for
+// stretches that stalled the backend.  A hit launches a timed walk that begins
+// at the MISSED window within the trace (installing windows demand has already
+// passed would be wasted), unless this trace is already being walked or the
+// walk limit is reached.
+void O3_CPU::do_alt_trigger(uint64_t alt_pc)
+{
+  const auto* ips = fill_store.lookup_window(alt_pc);
+  if (ips == nullptr || ips->empty()) {
+    return;
+  }
+  const uint64_t entry = ips->front();
+  if (std::any_of(std::begin(alt_walks), std::end(alt_walks), [entry](const auto& w) { return w.entry == entry; })) {
+    return; // this trace is already being walked
+  }
+  if (alt_walks.size() >= alt_walk_max) {
+    ++sim_stats.alt_drops;
+    return;
+  }
+  alt_walk w;
+  w.entry = entry;
+  w.ready = current_time + alt_walk_delay_cycles * clock_period;
+  uint64_t last = 0;
+  bool have_last = false;
+  for (uint64_t raw : *ips) { // group the trace's ips into distinct aligned windows, in order
+    const uint64_t tag = raw >> dib_window_bits;
+    if (have_last && tag == last) {
+      w.windows.back().push_back(raw);
+      continue;
+    }
+    have_last = true;
+    last = tag;
+    w.windows.push_back({raw});
+  }
+  // start at the missed window: skip windows demand has already gone past
+  const uint64_t miss_tag = alt_pc >> dib_window_bits;
+  for (std::size_t i = 0; i < w.windows.size(); ++i) {
+    if ((w.windows[i].front() >> dib_window_bits) == miss_tag) {
+      w.idx = i;
+      break;
+    }
+  }
+  alt_walks.push_back(std::move(w));
+  ++sim_stats.alt_triggers;
 }
 
 void O3_CPU::do_check_dib(ooo_model_instr& instr)
 {
   // Check the micro-op cache to see if we recently decoded this window
-  bool hit = DIB.check_hit(instr.ip);
+  bool was_prefetched = false;
+  bool hit = DIB.check_hit(instr.ip, &was_prefetched);
+  // ALT: on a demand miss, probe the trace store and launch the walk FIRST (dedup
+  // and walk-cap inside do_alt_trigger), then wait-on-pending.  Trigger-before-wait
+  // means even the walk's own triggering miss is served as a delayed hit: the
+  // frontend never switches to build mode for a covered miss (no switch stall per
+  // walk).  Uncovered or walk-capped misses fall through to the normal miss path.
+  // The wait leaves the entry un-checked (re-checks next cycle, L1I fetch held);
+  // placed before any counter so re-checks are side-effect-free.
+  if (fill_mode == fill_mode_type::ALT && !hit && !warmup) {
+    do_alt_trigger(instr.ip.to<uint64_t>());
+    if (alt_walk_wait && alt_window_pending(instr.ip.to<uint64_t>())) {
+      ++sim_stats.alt_wait_cycles;
+      return; // dib_checked stays false -> retried next cycle (hit-under-fill)
+    }
+  }
+  if (was_prefetched) {
+    ++sim_stats.alt_useful_hits; // first demand hit on a walk-installed window
+  }
   ++sim_stats.uop_cache_reads;
   // Trace-fill: install a stored trace's windows into the DIB.  The triggering
   // event depends on the mode (see fill_mode_type).  A miss turned into a hit by
   // the install is served without a build-mode switch.  FLUSH does no demand fill
   // here -- it installs only on a misprediction (see do_flush_fill).
-  if (fill_mode != fill_mode_type::OFF && fill_mode != fill_mode_type::FLUSH) {
+  // PERFECT trace cache (upper bound): a miss is served as a hit if the active
+  // builder's traces cover this window -- unbounded, proactive, no store.  Measures
+  // the IPC ceiling of the segmentation algorithm itself (staging / stall / filtered).
+  if (fill_mode == fill_mode_type::PERFECT && !hit) {
+    const uint64_t ip64 = instr.ip.to<uint64_t>();
+    if ((trace_stall_enable && stall.covers(ip64)) || (trace_stg_enable && stager.covers(ip64))) {
+      ++sim_stats.uop_trace_fill_hits;
+      hit = true;
+    }
+  }
+  // PARALLEL trace cache: probed alongside the u-op cache, feed-only.  On a u-op-cache
+  // miss, if the *bounded* trace store covers this window, the fetch is served from the
+  // trace cache (hit) WITHOUT installing into the DIB -- the u-op cache's contents are
+  // never disturbed (no eviction/pollution).  If neither hits, it falls through to the
+  // genuine-miss path (build mode -> L1I).  This models a realistic trace cache sitting
+  // in parallel with the u-op cache, unlike WINDOW which installs into the DIB.
+  if (fill_mode == fill_mode_type::PARALLEL && !hit) {
+    if (fill_store.lookup_window(instr.ip.to<uint64_t>()) != nullptr) {
+      ++sim_stats.uop_trace_fill_hits;
+      hit = true;
+    }
+  }
+  if (fill_mode != fill_mode_type::OFF && fill_mode != fill_mode_type::FLUSH && fill_mode != fill_mode_type::PERFECT
+      && fill_mode != fill_mode_type::PARALLEL && fill_mode != fill_mode_type::ALT) {
     const std::vector<uint64_t>* ips = nullptr;
     if (fill_mode == fill_mode_type::EVERY) {
       ips = fill_store.lookup_entry(instr.ip.to<uint64_t>()); // hit-or-miss at a trace entry
@@ -281,6 +412,12 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     // and sub-count whether the missing IP is covered by a stored trace (the
     // ceiling for what trace-fill could serve).
     const uint64_t rawip = instr.ip.to<uint64_t>();
+    // ALT: miss on a window that an in-flight walk holds but has not yet installed --
+    // the trigger fired, the walk was just too slow.  Measures the timing loss.
+    // (With alt_walk_wait on, these become alt_wait_cycles instead and this stays ~0.)
+    if (fill_mode == fill_mode_type::ALT && alt_window_pending(rawip)) {
+      ++sim_stats.alt_late_misses;
+    }
     const bool traced = (trace_stg_enable && stager.covers(rawip)) || (trace_stall_enable && stall.covers(rawip));
     if (in_recovery) {
       ++sim_stats.uop_miss_recovery;
@@ -304,9 +441,16 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   }
 
   // stall-triggered segmenter: feed the fetch stream (hit closes/commits a costly
-  // build-mode stretch; miss extends the current one). See inc/trace_stall.h.
+  // build-mode stretch; miss extends the current one). See inc/trace_stall.h.  When
+  // it commits a new trace and trace-fill is on, push it into the trace cache -- so
+  // trace_builder=stall makes the stall segmenter the fill source.
   if (trace_stall_enable && !warmup) {
+    const std::size_t before = stall.get_traces().size();
     stall.on_dib(instr.ip.to<uint64_t>(), hit, sim_stats);
+    if (fill_mode != fill_mode_type::OFF && stall.get_traces().size() > before) {
+      const auto& t = stall.get_traces().back();
+      fill_store.insert(t.entry, t.ips);
+    }
   }
 
   instr.dib_checked = true;
@@ -586,10 +730,14 @@ long O3_CPU::dispatch_instruction()
       } else {
         ++sim_stats.rob_idle_steady;
       }
-      // the ROB drained empty in build mode: mark the in-flight stall stretch costly
-      if (trace_stall_enable && !warmup) {
-        stall.note_rob_empty();
-      }
+    }
+    // stall-segmenter trigger: a build-mode dispatch-starve cycle where the ROB has
+    // drained to at/below stall_rob_threshold marks the in-flight stretch costly.
+    // threshold 0 = fully empty (the tight condition); a higher value broadens the
+    // trigger to partial (near-empty) stalls, capturing recurring stretches the
+    // fully-empty trigger misses.
+    if (trace_stall_enable && !warmup && std::size(ROB) <= stall_rob_threshold) {
+      stall.note_stall();
     }
   }
 

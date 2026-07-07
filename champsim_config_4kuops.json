@@ -30,7 +30,15 @@
       "branch_predictor": "tage_sc_l",
       "btb": "basic_btb",
       "trace_builder": "stall",
-      "trace_fill": "window"
+      "trace_fill": "alt",
+      "trace_stall_min_occ": 1,
+      "trace_stall_rob": 1,
+      "trace_stall_depth": 64,
+      "trace_store": 16384,
+      "trace_walk_delay": 2,
+      "trace_walk_max": 2,
+      "trace_walk_width": 1,
+      "trace_walk_wait": 1
     }
   ],
   "DIB": {

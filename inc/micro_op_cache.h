@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -39,6 +40,7 @@ public:
     bool valid = false;
     bool active = false;             // an entry deactivated by a termination condition
     bool terminated_by_taken = false;
+    bool prefetched = false;         // installed by a trace-fill walk, not yet demand-hit
     int num_br = 0;
     uint64_t last_used = 0;          // LRU timestamp
   };
@@ -49,7 +51,9 @@ public:
   }
 
   // stream-mode lookup: hit on any matching window tag (tag-only, as in UCP).
-  bool check_hit(champsim::address ip)
+  // was_prefetched (optional out) reports a first demand hit on a walk-installed
+  // window (the walk-accuracy signal); the hit also promotes it to MRU as usual.
+  bool check_hit(champsim::address ip, bool* was_prefetched = nullptr)
   {
     if (ideal_ == IDEAL_ORACLE) // every lookup hits (perfect-DIB upper bound)
       return true;
@@ -62,6 +66,12 @@ public:
     for (auto it = set_begin; it != set_end; ++it) {
       if (it->valid && it->tag == t) {
         it->last_used = ++lru_clock;
+        if (it->prefetched) {
+          it->prefetched = false;
+          if (was_prefetched != nullptr) {
+            *was_prefetched = true;
+          }
+        }
         return true;
       }
     }
@@ -69,7 +79,11 @@ public:
   }
 
   // build-mode fill: replicates UCP Insert() entry-termination semantics.
-  void fill(champsim::address ip, bool taken_end, bool is_branch)
+  // prefetch=true (trace-fill walks): a NEW allocation is inserted at LRU (most
+  // evictable) and flagged, so unused prefetches die first and a demand hit
+  // promotes them (check_hit) -- models a prefetch/staging insertion policy
+  // instead of letting speculative installs displace hot entries at MRU.
+  void fill(champsim::address ip, bool taken_end, bool is_branch, bool prefetch = false)
   {
     if (ideal_ == IDEAL_ORACLE) // nothing to store: every lookup already hits
       return;
@@ -101,7 +115,10 @@ public:
         if (is_branch && it->num_br < MAX_BRANCHES_PER_ENTRY) {
           ++it->num_br;
         }
-        it->last_used = ++lru_clock;
+        if (!prefetch) { // a walk refresh must not promote (nor demote) a resident entry
+          it->last_used = ++lru_clock;
+          it->prefetched = false;
+        }
         tag_found = true;
         break;
       }
@@ -116,14 +133,47 @@ public:
       victim->active = true;
       victim->terminated_by_taken = false;
       victim->num_br = 0;
-      victim->last_used = ++lru_clock;
+      victim->prefetched = prefetch;
+      if (prefetch) { // insert at LRU: oldest surviving timestamp in the set, minus one
+        uint64_t oldest = std::numeric_limits<uint64_t>::max();
+        for (auto it = set_begin; it != set_end; ++it) {
+          if (it->valid && it != victim && it->last_used < oldest) {
+            oldest = it->last_used;
+          }
+        }
+        victim->last_used = (oldest == std::numeric_limits<uint64_t>::max() || oldest == 0) ? 0 : oldest - 1;
+      } else {
+        victim->last_used = ++lru_clock;
+      }
     }
+  }
+
+  // presence check without touching LRU state (used by the alt-trigger walk to
+  // skip walks whose target windows are already resident).
+  [[nodiscard]] bool probe(champsim::address ip) const
+  {
+    if (ideal_ == IDEAL_ORACLE)
+      return true;
+    if (ideal_ == IDEAL_COLD_MISS)
+      return seen_.count(tag_of(ip)) != 0;
+    if (block.empty())
+      return false;
+    const uint64_t t = tag_of(ip);
+    const auto set_idx = static_cast<std::size_t>(t % NUM_SET);
+    for (std::size_t w = 0; w < NUM_WAY; ++w) {
+      const auto& e = block[set_idx * NUM_WAY + w];
+      if (e.valid && e.tag == t) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // trace-fill (option a): pre-install a trace's windows so later fetches hit.
   // Marks each distinct aligned window present (a build with no termination).
+  // prefetch=true uses the LRU-insertion policy (see fill).
   // Returns the number of distinct windows touched.
-  std::size_t install(const std::vector<uint64_t>& ips)
+  std::size_t install(const std::vector<uint64_t>& ips, bool prefetch = false)
   {
     // oracle: nothing to install (all hits); off with no cache: nothing to do.
     // cold-miss falls through and marks windows decoded via fill() -> seen_.
@@ -141,7 +191,7 @@ public:
       }
       have_last = true;
       last = t;
-      fill(ip, false, false); // insert/refresh -> window present
+      fill(ip, false, false, prefetch); // insert/refresh -> window present
       ++windows;
     }
     return windows;

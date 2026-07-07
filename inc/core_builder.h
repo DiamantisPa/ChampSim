@@ -44,6 +44,14 @@ struct core_builder_base {
   int m_dib_ideal{0}; // ideal u-op cache mode: 0=off, 1=oracle (always hit), 2=cold-miss (infinite capacity)
   std::string m_trace_builder{"both"}; // Prometheus trace builder: both/backward/forward/off
   std::string m_trace_fill{"off"};     // Prometheus trace-fill mode: off/miss/every/window
+  int m_trace_stall_min_occ{1};        // stall segmenter: min occurrences to capture a trace (1 = no filter)
+  int m_trace_stall_rob{0};            // stall segmenter: ROB-occupancy trigger threshold (0 = fully empty)
+  int m_trace_stall_depth{64};         // stall segmenter: max trace length in u-ops (truncation cap)
+  int m_trace_store{256};              // trace-cache capacity in traces (bounded fill modes)
+  int m_trace_walk_delay{5};           // alt fill: trigger-to-first-install latency in cycles
+  int m_trace_walk_max{2};             // alt fill: max concurrent walks
+  int m_trace_walk_width{1};           // alt fill: windows installed per walk per cycle
+  int m_trace_walk_wait{0};            // alt fill: 1 = miss on a walk-pending window stalls fetch instead of switching to build
   std::size_t m_ifetch_buffer_size{1};
   std::size_t m_decode_buffer_size{1};
   std::size_t m_dispatch_buffer_size{1};
@@ -138,6 +146,56 @@ public:
    * non-off mode forces the staging builder on to feed the trace cache.
    */
   self_type& trace_fill(std::string trace_fill_);
+
+  /**
+   * Stall segmenter occurrence filter: only capture a stall trace once its start
+   * IP has recurred at least this many times (1 = no filtering).
+   */
+  self_type& trace_stall_min_occ(int trace_stall_min_occ_);
+
+  /**
+   * Stall segmenter trigger threshold: a build-mode dispatch-starve cycle marks the
+   * stretch costly when ROB occupancy <= this value (0 = fully empty; higher captures
+   * partial/near-empty stalls).
+   */
+  self_type& trace_stall_rob(int trace_stall_rob_);
+
+  /**
+   * Stall segmenter max trace length in u-ops: a build-mode stretch longer than
+   * this is truncated (default 64).
+   */
+  self_type& trace_stall_depth(int trace_stall_depth_);
+
+  /**
+   * Trace-cache capacity in traces (LRU). Used by all bounded fill modes
+   * (miss/every/window/flush/parallel/alt); default 256.
+   */
+  self_type& trace_store(int trace_store_);
+
+  /**
+   * ALT fill mode: walk latency in cycles from trigger to the first window
+   * install (models L1I fetch + pre-decode pipe fill); default 5.
+   */
+  self_type& trace_walk_delay(int trace_walk_delay_);
+
+  /**
+   * ALT fill mode: maximum concurrent walks; extra trigger hits are dropped
+   * (default 2).
+   */
+  self_type& trace_walk_max(int trace_walk_max_);
+
+  /**
+   * ALT fill mode: windows installed per walk per cycle (pre-decode width in
+   * 8-uop windows; default 1 = 8 uops/cycle, 2 = 16 uops/cycle).
+   */
+  self_type& trace_walk_width(int trace_walk_width_);
+
+  /**
+   * ALT fill mode: when 1, a demand miss on a window held by an in-flight walk
+   * stalls fetch until the window installs (hit-under-fill; no stream->build
+   * switch), instead of falling to build mode.  Default 0.
+   */
+  self_type& trace_walk_wait(int trace_walk_wait_);
 
   /**
    * Specify the maximum size of the instruction fetch buffer.
@@ -348,6 +406,62 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_fill(std::string trace_fill_) -> self_type&
 {
   m_trace_fill = std::move(trace_fill_);
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_stall_min_occ(int trace_stall_min_occ_) -> self_type&
+{
+  m_trace_stall_min_occ = trace_stall_min_occ_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_stall_rob(int trace_stall_rob_) -> self_type&
+{
+  m_trace_stall_rob = trace_stall_rob_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_stall_depth(int trace_stall_depth_) -> self_type&
+{
+  m_trace_stall_depth = trace_stall_depth_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_store(int trace_store_) -> self_type&
+{
+  m_trace_store = trace_store_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_delay(int trace_walk_delay_) -> self_type&
+{
+  m_trace_walk_delay = trace_walk_delay_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_max(int trace_walk_max_) -> self_type&
+{
+  m_trace_walk_max = trace_walk_max_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_width(int trace_walk_width_) -> self_type&
+{
+  m_trace_walk_width = trace_walk_width_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_wait(int trace_walk_wait_) -> self_type&
+{
+  m_trace_walk_wait = trace_walk_wait_;
   return *this;
 }
 

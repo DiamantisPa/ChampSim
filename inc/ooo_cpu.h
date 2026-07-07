@@ -126,6 +126,11 @@ public:
   // bucket u-op misses / build-mode stalls as recovery vs steady-state.
   bool in_recovery{false};
 
+  // stall segmenter trigger: a build-mode dispatch-starve cycle marks the in-flight
+  // stretch costly when ROB occupancy <= this threshold. 0 = fully empty (tight);
+  // higher broadens to partial (near-empty) stalls. See dispatch_instruction().
+  std::size_t stall_rob_threshold{0};
+
   // Prometheus trace builders, fed from the post-merge u-op stream, run in
   // parallel so their coverage/trace stats can be diffed (seg_* / rec_* / stg_*):
   //   * segmenter -- backward oracle (512-ring + backward walk; not synthesizable)
@@ -149,9 +154,31 @@ public:
   //   WINDOW - fill on a miss anywhere in a trace's footprint      (window-indexed)
   //   FLUSH  - fill on a branch misprediction, window-matched at the recovery PC
   //            (no demand fill; the UCP-style "fast refill" trigger)
-  enum class fill_mode_type { OFF, MISS, EVERY, WINDOW, FLUSH };
+  //   PERFECT- upper bound: hit on ANY window the active builder covers (unbounded,
+  //            proactive, no store) -- the segmentation algorithm's IPC ceiling
+  enum class fill_mode_type { OFF, MISS, EVERY, WINDOW, FLUSH, PERFECT, PARALLEL, ALT };
   trace_store fill_store{};
   fill_mode_type fill_mode{fill_mode_type::OFF};
+
+  // ALT mode: metadata trace cache + timed pre-decode walk.  At decode of a
+  // conditional branch, the ALTERNATE (not-predicted) direction's PC probes the
+  // window-indexed trace store; a hit launches a "walk" that installs the trace's
+  // windows into the u-op cache one window per cycle after a base delay
+  // (PROMETHEUS_WALK_DELAY cycles ~ L1I + decode pipe fill).  Trace existence is
+  // the trigger filter (traces exist only for historically stall-costly paths).
+  // At most alt_walk_max walks are in flight; extra triggers are dropped.
+  struct alt_walk {
+    champsim::chrono::clock::time_point ready{};
+    std::vector<std::vector<uint64_t>> windows; // per-window ip groups, in trace order
+    std::size_t idx = 0;                        // next window to install
+    uint64_t entry = 0;                         // trace entry PC (dedup)
+  };
+  std::deque<alt_walk> alt_walks;
+  std::size_t alt_walk_max = 2;
+  int alt_walk_delay_cycles = 5;
+  int alt_walk_width = 1;      // windows installed per walk per cycle (pre-decode width)
+  bool alt_walk_wait = false;  // miss on a walk-pending window stalls fetch (hit-under-fill) instead of switching to build
+  unsigned dib_window_bits = 0;
 
   // Resolve the trace-fill mode from the "trace_fill" config field, overridden
   // by PROMETHEUS_TRACE_FILL when set.  Accepts off/miss/every/window (and the
@@ -168,6 +195,15 @@ public:
     }
     if (v == "flush") {
       return fill_mode_type::FLUSH;
+    }
+    if (v == "perfect") {
+      return fill_mode_type::PERFECT;
+    }
+    if (v == "parallel") {
+      return fill_mode_type::PARALLEL;
+    }
+    if (v == "alt") {
+      return fill_mode_type::ALT;
     }
     if (v == "miss" || v == "1") {
       return fill_mode_type::MISS;
@@ -231,6 +267,9 @@ public:
 
   void initialize_instruction();
   long check_dib();
+  void drain_alt_walks();
+  void do_alt_trigger(uint64_t alt_pc);
+  [[nodiscard]] bool alt_window_pending(uint64_t rawip) const;
   long fetch_instruction();
   long promote_to_decode();
   long decode_instruction();
@@ -338,11 +377,56 @@ public:
       const std::string v = (e != nullptr && *e != '\0') ? std::string{e} : b.m_trace_builder;
       trace_stall_enable = (v == "stall" || v == "all");
     }
+    if (trace_stall_enable) {
+      int min_occ = b.m_trace_stall_min_occ; // config "trace_stall_min_occ"
+      if (const char* e = std::getenv("PROMETHEUS_STALL_MIN_OCC"); e != nullptr && *e != '\0') {
+        min_occ = std::atoi(e); // env override for sweeps
+      }
+      stall.configure(min_occ);
+      int rob_th = b.m_trace_stall_rob; // config "trace_stall_rob" (partial-stall trigger threshold)
+      if (const char* e = std::getenv("PROMETHEUS_STALL_ROB"); e != nullptr && *e != '\0') {
+        rob_th = std::atoi(e); // env override for sweeps
+      }
+      stall_rob_threshold = (rob_th < 0) ? 0 : static_cast<std::size_t>(rob_th);
+      int depth = b.m_trace_stall_depth; // config "trace_stall_depth" (max trace length)
+      if (const char* e = std::getenv("PROMETHEUS_STALL_DEPTH"); e != nullptr && *e != '\0') {
+        depth = std::atoi(e); // env override for sweeps
+      }
+      stall.set_max_uops(depth);
+    }
     fill_mode = resolve_fill_mode(b.m_trace_fill);
     if (fill_mode != fill_mode_type::OFF) {
-      trace_stg_enable = true; // trace-fill is fed by the stager
-      const bool window_indexed = (fill_mode == fill_mode_type::WINDOW || fill_mode == fill_mode_type::FLUSH);
+      // trace-fill is fed by whichever trace builder is selected (stall or stager,
+      // per trace_builder); if the user picked neither, default to the stager.
+      if (!trace_stall_enable && !trace_stg_enable) {
+        trace_stg_enable = true;
+      }
+      const bool window_indexed = (fill_mode == fill_mode_type::WINDOW || fill_mode == fill_mode_type::FLUSH || fill_mode == fill_mode_type::PARALLEL
+                                   || fill_mode == fill_mode_type::ALT);
       fill_store.configure(static_cast<unsigned>(champsim::lg2(b.m_dib_window)), window_indexed);
+      dib_window_bits = static_cast<unsigned>(champsim::lg2(b.m_dib_window));
+      // capacity/walk knobs: JSON value, overridden by env (env > JSON > default)
+      int store_cap = b.m_trace_store;
+      if (const char* e = std::getenv("PROMETHEUS_TRACE_STORE"); e != nullptr && *e != '\0') {
+        store_cap = std::atoi(e);
+      }
+      fill_store.set_capacity(static_cast<std::size_t>(store_cap < 1 ? 1 : store_cap));
+      alt_walk_delay_cycles = b.m_trace_walk_delay;
+      if (const char* e = std::getenv("PROMETHEUS_WALK_DELAY"); e != nullptr && *e != '\0') {
+        alt_walk_delay_cycles = std::atoi(e); // base install delay in cycles (~L1I + decode)
+      }
+      alt_walk_max = static_cast<std::size_t>(b.m_trace_walk_max < 1 ? 1 : b.m_trace_walk_max);
+      if (const char* e = std::getenv("PROMETHEUS_WALK_MAX"); e != nullptr && *e != '\0') {
+        alt_walk_max = static_cast<std::size_t>(std::atoi(e)); // concurrent walks
+      }
+      alt_walk_width = (b.m_trace_walk_width < 1) ? 1 : b.m_trace_walk_width;
+      if (const char* e = std::getenv("PROMETHEUS_WALK_WIDTH"); e != nullptr && *e != '\0') {
+        alt_walk_width = std::max(1, std::atoi(e)); // windows installed per walk per cycle
+      }
+      alt_walk_wait = (b.m_trace_walk_wait != 0);
+      if (const char* e = std::getenv("PROMETHEUS_WALK_WAIT"); e != nullptr && *e != '\0') {
+        alt_walk_wait = (std::atoi(e) != 0); // stall fetch on walk-pending misses
+      }
     }
   }
 };

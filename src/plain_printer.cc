@@ -114,8 +114,8 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.stg_dynamic_uops_covered, stats.stg_dynamic_uops,
                               ::print_ratio(100 * static_cast<long long>(stats.stg_dynamic_uops_covered), static_cast<long long>(stats.stg_dynamic_uops))));
 
-  lines.push_back(fmt::format("{} trace-stall: traces {} dedup-hits {} stored-uops {}", stats.name, stats.stall_traces, stats.stall_dedup,
-                              stats.stall_stored_uops));
+  lines.push_back(fmt::format("{} trace-stall: traces {} (of {} candidates) dedup-hits {} stored-uops {}", stats.name, stats.stall_traces,
+                              stats.stall_traces_candidates, stats.stall_dedup, stats.stall_stored_uops));
   lines.push_back(fmt::format("{} trace-stall coverage: unique IPs {}/{} ({}%) dynamic uops {}/{} ({}%)", stats.name, stats.stall_unique_ips_covered,
                               stats.stall_unique_ips_seen,
                               ::print_ratio(100 * static_cast<long long>(stats.stall_unique_ips_covered), static_cast<long long>(stats.stall_unique_ips_seen)),
@@ -124,20 +124,40 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
   {
     const auto tw = static_cast<long long>(stats.stall_total_dynweight);
     auto p = [tw](uint64_t v) { return ::print_ratio(100 * static_cast<long long>(v), tw); };
+    const auto tc = static_cast<long long>(stats.stall_total_cost);
+    auto pc = [tc](uint64_t v) { return ::print_ratio(100 * static_cast<long long>(v), tc); };
     auto a = [](const std::array<double, 7>& v) {
       return fmt::format("16={:.1f} 32={:.1f} 64={:.1f} 128={:.1f} 256={:.1f} 512={:.1f} 1024={:.1f}", v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+    };
+    auto pcs = [&pc](const std::array<uint64_t, 7>& v) {
+      return fmt::format("16={}% 32={}% 64={}% 128={}% 256={}% 512={}% 1024={}%", pc(v[0]), pc(v[1]), pc(v[2]), pc(v[3]), pc(v[4]), pc(v[5]), pc(v[6]));
     };
     lines.push_back(fmt::format("{} trace-stall top-by-occurrence (cum% dyn-weight): 16={}% 32={}% 64={}% 128={}% 256={}% 512={}% 1024={}%", stats.name,
                                 p(stats.stall_occ_top16), p(stats.stall_occ_top32), p(stats.stall_occ_top64), p(stats.stall_occ_top128),
                                 p(stats.stall_occ_top256), p(stats.stall_occ_top512), p(stats.stall_occ_top1024)));
+    lines.push_back(fmt::format("{} trace-stall top-by-occurrence (cum% stall-cycles): {}", stats.name, pcs(stats.stall_occ_cumcost)));
     lines.push_back(fmt::format("{} trace-stall top-by-occurrence avg-occ: {}", stats.name, a(stats.stall_occ_avgocc)));
     lines.push_back(fmt::format("{} trace-stall top-by-occurrence avg-len: {}", stats.name, a(stats.stall_occ_avglen)));
     lines.push_back(fmt::format("{} trace-stall top-by-coverage (cum% dyn-weight): 16={}% 32={}% 64={}% 128={}% 256={}% 512={}% 1024={}%", stats.name,
                                 p(stats.stall_cov_top16), p(stats.stall_cov_top32), p(stats.stall_cov_top64), p(stats.stall_cov_top128),
                                 p(stats.stall_cov_top256), p(stats.stall_cov_top512), p(stats.stall_cov_top1024)));
+    lines.push_back(fmt::format("{} trace-stall top-by-coverage (cum% stall-cycles): {}", stats.name, pcs(stats.stall_cov_cumcost)));
     lines.push_back(fmt::format("{} trace-stall top-by-coverage avg-occ: {}", stats.name, a(stats.stall_cov_avgocc)));
     lines.push_back(fmt::format("{} trace-stall top-by-coverage avg-len: {}", stats.name, a(stats.stall_cov_avglen)));
+    lines.push_back(fmt::format("{} trace-stall top-by-cost (cum% stall-cycles): 16={}% 32={}% 64={}% 128={}% 256={}% 512={}% 1024={}% (total {})",
+                                stats.name, pc(stats.stall_cost_cum[0]), pc(stats.stall_cost_cum[1]), pc(stats.stall_cost_cum[2]),
+                                pc(stats.stall_cost_cum[3]), pc(stats.stall_cost_cum[4]), pc(stats.stall_cost_cum[5]), pc(stats.stall_cost_cum[6]),
+                                stats.stall_total_cost));
+    lines.push_back(fmt::format("{} trace-stall top-by-cost (cum% dyn-weight): 16={}% 32={}% 64={}% 128={}% 256={}% 512={}% 1024={}%", stats.name,
+                                p(stats.stall_cost_cumw[0]), p(stats.stall_cost_cumw[1]), p(stats.stall_cost_cumw[2]), p(stats.stall_cost_cumw[3]),
+                                p(stats.stall_cost_cumw[4]), p(stats.stall_cost_cumw[5]), p(stats.stall_cost_cumw[6])));
+    lines.push_back(fmt::format("{} trace-stall top-by-cost avg-occ: {}", stats.name, a(stats.stall_cost_avgocc)));
+    lines.push_back(fmt::format("{} trace-stall top-by-cost avg-len: {}", stats.name, a(stats.stall_cost_avglen)));
   }
+
+  lines.push_back(fmt::format("{} trace-alt: triggers {} dropped {} installed-windows {} late-misses {} useful-hits {} wait-cycles {}", stats.name,
+                              stats.alt_triggers, stats.alt_drops, stats.alt_installed_windows, stats.alt_late_misses, stats.alt_useful_hits,
+                              stats.alt_wait_cycles));
 
   lines.push_back(fmt::format("{} trace-seg loss(dyn): covered-final {} latency {} | no-trigger {} overflow {} bad-layout {} short {}", stats.name,
                               stats.seg_dyn_covered_final, stats.seg_dyn_covered_final - stats.seg_dynamic_uops_covered, stats.seg_dyn_lost_no_trigger,

@@ -25,17 +25,24 @@ RE_TIGHT = re.compile(r'frontend-loss backend-idle \(tight\): steady (\d+) recov
 RE_STG = re.compile(r'trace-stg: loop (\d+) function (\d+) dedup-hits (\d+) entangled (\d+) '
                     r'dropped: bad-layout (\d+) overflow (\d+) short (\d+) stored-uops (\d+)', re.M)
 RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
-RE_STALL = re.compile(r'trace-stall: traces (\d+) dedup-hits (\d+) stored-uops (\d+)', re.M)
+RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)', re.M)
 RE_STALL_COV = re.compile(r'trace-stall coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
 BKT_LABELS = [16, 32, 64, 128, 256, 512, 1024]
 _bkt = ' '.join(fr'{n}=([\d.-]+)%' for n in BKT_LABELS)
 RE_STALL_OCC = re.compile(r'trace-stall top-by-occurrence \(cum% dyn-weight\): ' + _bkt, re.M)
 RE_STALL_COVB = re.compile(r'trace-stall top-by-coverage \(cum% dyn-weight\): ' + _bkt, re.M)
+RE_STALL_COSTC = re.compile(r'trace-stall top-by-cost \(cum% stall-cycles\): ' + _bkt + r'(?: \(total (\d+)\))?', re.M)
+RE_STALL_COSTW = re.compile(r'trace-stall top-by-cost \(cum% dyn-weight\): ' + _bkt, re.M)
+RE_OCC_COSTC = re.compile(r'trace-stall top-by-occurrence \(cum% stall-cycles\): ' + _bkt, re.M)
+RE_COV_COSTC = re.compile(r'trace-stall top-by-coverage \(cum% stall-cycles\): ' + _bkt, re.M)
 _bktv = ' '.join(fr'{n}=([\d.-]+)' for n in BKT_LABELS)  # avg-occ / avg-len (no % suffix)
 RE_OCC_AVGOCC = re.compile(r'trace-stall top-by-occurrence avg-occ: ' + _bktv, re.M)
 RE_OCC_AVGLEN = re.compile(r'trace-stall top-by-occurrence avg-len: ' + _bktv, re.M)
 RE_COV_AVGOCC = re.compile(r'trace-stall top-by-coverage avg-occ: ' + _bktv, re.M)
 RE_COV_AVGLEN = re.compile(r'trace-stall top-by-coverage avg-len: ' + _bktv, re.M)
+RE_CST_AVGOCC = re.compile(r'trace-stall top-by-cost avg-occ: ' + _bktv, re.M)
+RE_CST_AVGLEN = re.compile(r'trace-stall top-by-cost avg-len: ' + _bktv, re.M)
+RE_ALT = re.compile(r'trace-alt: triggers (\d+) dropped (\d+) installed-windows (\d+) late-misses (\d+)(?: useful-hits (\d+))?(?: wait-cycles (\d+))?', re.M)
 
 
 def parse_file(path):
@@ -77,7 +84,8 @@ def parse_file(path):
 
     st = RE_STALL.search(txt)
     if st:
-        d['stall_traces'], d['stall_dedup'], d['stall_stored_uops'] = int(st.group(1)), int(st.group(2)), int(st.group(3))
+        d['stall_traces'], d['stall_candidates'] = int(st.group(1)), int(st.group(2))
+        d['stall_dedup'], d['stall_stored_uops'] = int(st.group(3)), int(st.group(4))
     stc = RE_STALL_COV.search(txt)
     if stc:
         d['stall_uniq_cov'], d['stall_uniq_seen'] = int(stc.group(1)), int(stc.group(2))
@@ -98,7 +106,27 @@ def parse_file(path):
     cb = RE_STALL_COVB.search(txt)
     if cb:
         d['stall_cov_bkt'] = _floats(cb)
-    for key, rx in (('s_oo', RE_OCC_AVGOCC), ('s_ol', RE_OCC_AVGLEN), ('s_co', RE_COV_AVGOCC), ('s_cl', RE_COV_AVGLEN)):
+    okc = RE_OCC_COSTC.search(txt)
+    if okc:
+        d['stall_occ_cost_bkt'] = _floats(okc)
+    ckc = RE_COV_COSTC.search(txt)
+    if ckc:
+        d['stall_cov_cost_bkt'] = _floats(ckc)
+    kc = RE_STALL_COSTC.search(txt)
+    if kc:
+        d['stall_cost_bkt'] = _floats(kc)[:len(BKT_LABELS)]  # 8th group is the optional total
+        d['stall_cost_total'] = int(kc.group(len(BKT_LABELS) + 1)) if kc.group(len(BKT_LABELS) + 1) else None
+    kw = RE_STALL_COSTW.search(txt)
+    if kw:
+        d['stall_costw_bkt'] = _floats(kw)
+    al = RE_ALT.search(txt)
+    if al:
+        d['alt_triggers'], d['alt_drops'] = int(al.group(1)), int(al.group(2))
+        d['alt_windows'], d['alt_late'] = int(al.group(3)), int(al.group(4))
+        d['alt_useful'] = int(al.group(5)) if al.group(5) else None
+        d['alt_wait'] = int(al.group(6)) if al.group(6) else None
+    for key, rx in (('s_oo', RE_OCC_AVGOCC), ('s_ol', RE_OCC_AVGLEN), ('s_co', RE_COV_AVGOCC), ('s_cl', RE_COV_AVGLEN),
+                    ('s_ko', RE_CST_AVGOCC), ('s_kl', RE_CST_AVGLEN)):
         mm2 = rx.search(txt)
         if mm2:
             d[key] = _floats(mm2)
@@ -161,7 +189,9 @@ def aggregate(path, pattern, include):
     have_stall = [r for r in rows if r.get('stall_dyn_tot', 0) > 0 or r.get('stall_traces', 0) > 0]
     if have_stall:
         print("\n--- trace capture (stall segmenter) ---")
-        print(f"traces captured:   {amean([r['stall_traces'] for r in have_stall]):,.0f}   "
+        cand = amean([r.get('stall_candidates', r['stall_traces']) for r in have_stall])
+        kept = amean([r['stall_traces'] for r in have_stall])
+        print(f"traces captured:   {kept:,.0f}   of {cand:,.0f} candidates ({pct(kept, cand):.1f}% kept after filter)   "
             f"(dedup re-hits {amean([r['stall_dedup'] for r in have_stall]):,.0f})")
         print(f"stored u-ops:      {amean([r['stall_stored_uops'] for r in have_stall]):,.0f}")
         cov_have = [r for r in have_stall if 'stall_dyn_tot' in r]
@@ -178,16 +208,54 @@ def aggregate(path, pattern, include):
             def _row(vals, unit=''):
                 return "  ".join(f"{n}={v:.1f}{unit}" for n, v in zip(BKT_LABELS, vals))
             oo, ol, co, cl = _colavg('s_oo'), _colavg('s_ol'), _colavg('s_co'), _colavg('s_cl')
+            occ_cost, cov_cost = _colavg('stall_occ_cost_bkt'), _colavg('stall_cov_cost_bkt')
             print("top-N traces, ranked by OCCURRENCE:")
             print("  cum% dyn-weight: " + _row(occ_avg, '%'))
+            if occ_cost:
+                print("  cum% stall-cyc:  " + _row(occ_cost, '%'))
             if oo:
                 print("  avg occurrence:  " + _row(oo))
                 print("  avg length:      " + _row(ol))
             print("top-N traces, ranked by COVERAGE:")
             print("  cum% dyn-weight: " + _row(cov_avg, '%'))
+            if cov_cost:
+                print("  cum% stall-cyc:  " + _row(cov_cost, '%'))
             if co:
                 print("  avg occurrence:  " + _row(co))
                 print("  avg length:      " + _row(cl))
+        cost_avg, costw_avg = _colavg('stall_cost_bkt'), _colavg('stall_costw_bkt')
+        if cost_avg:
+            def _row2(vals, unit=''):
+                return "  ".join(f"{n}={v:.1f}{unit}" for n, v in zip(BKT_LABELS, vals))
+            ko, kl = _colavg('s_ko'), _colavg('s_kl')
+            tot = amean([r['stall_cost_total'] for r in have_stall if r.get('stall_cost_total') is not None])
+            print("top-N traces, ranked by ROB-STALL COST:")
+            print(f"  cum% stall-cyc:  " + _row2(cost_avg, '%') + (f"   (avg total {tot:,.0f} cycles)" if not math.isnan(tot) else ""))
+            if costw_avg:
+                print("  cum% dyn-weight: " + _row2(costw_avg, '%'))
+            if ko:
+                print("  avg occurrence:  " + _row2(ko))
+                print("  avg length:      " + _row2(kl))
+
+    # ALT fill mode (metadata trace cache + timed pre-decode walk), shown when active
+    have_alt = [r for r in rows if r.get('alt_triggers', 0) > 0]
+    if have_alt:
+        print("\n--- alt-trigger walk (metadata pre-decode) ---")
+        trig = amean([r['alt_triggers'] for r in have_alt])
+        drop = amean([r['alt_drops'] for r in have_alt])
+        wins = amean([r['alt_windows'] for r in have_alt])
+        late = amean([r['alt_late'] for r in have_alt])
+        print(f"walks launched:    {trig:,.0f}   (dropped {drop:,.0f} = {pct(drop, trig + drop):.1f}% of trigger hits)")
+        print(f"windows installed: {wins:,.0f}")
+        print(f"late misses:       {late:,.0f}   (walk in flight but too slow)")
+        useful = [r['alt_useful'] for r in have_alt if r.get('alt_useful') is not None]
+        if useful:
+            acc = amean([pct(r['alt_useful'], r['alt_windows']) for r in have_alt if r.get('alt_useful') is not None and r['alt_windows']])
+            print(f"useful hits:       {amean(useful):,.0f}   (walk accuracy {acc:.1f}% of installed windows)")
+        waits = [r['alt_wait'] for r in have_alt if r.get('alt_wait') is not None]
+        if waits:
+            wpct = amean([pct(r['alt_wait'], r['cycles']) for r in have_alt if r.get('alt_wait') is not None and r['cycles']])
+            print(f"wait cycles:       {amean(waits):,.0f}   ({wpct:.2f}% of runtime; hit-under-fill stalls)")
 
     have_fe = [r for r in rows if 'ti_total' in r]
     if not have_fe:

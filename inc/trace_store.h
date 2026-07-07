@@ -28,6 +28,10 @@ public:
     window_indexed = window_indexed_;
   }
 
+  // capacity in traces; must be called before any insert (env still overrides
+  // the JSON knob: precedence env > JSON > default, like the other knobs).
+  void set_capacity(std::size_t cap) { capacity = (cap < 1) ? 1 : cap; }
+
   [[nodiscard]] std::size_t cap() const { return capacity; }
   [[nodiscard]] std::size_t size() const { return entries.size(); }
 
