@@ -30,15 +30,19 @@
       "branch_predictor": "tage_sc_l",
       "btb": "basic_btb",
       "trace_builder": "stall",
-      "trace_fill": "alt",
+      "trace_fill": "parallel",
       "trace_stall_min_occ": 1,
       "trace_stall_rob": 1,
-      "trace_stall_depth": 64,
-      "trace_store": 16384,
-      "trace_walk_delay": 2,
+      "trace_stall_depth": 8,
+      "trace_store": 512,
+      "trace_walk_delay": 0,
       "trace_walk_max": 2,
       "trace_walk_width": 1,
-      "trace_walk_wait": 1
+      "trace_walk_wait": 1,
+      "trace_walk_l1i": 1,
+      "trace_walk_wait_cap": 1,
+      "trace_stall_l1i_gate": 1,
+      "trace_store_cost_evict": 0
     }
   ],
   "DIB": {

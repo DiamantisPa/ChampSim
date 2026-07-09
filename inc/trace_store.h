@@ -32,10 +32,14 @@ public:
   // the JSON knob: precedence env > JSON > default, like the other knobs).
   void set_capacity(std::size_t cap) { capacity = (cap < 1) ? 1 : cap; }
 
+  // replacement policy: false = LRU (default), true = evict the minimum
+  // stall-cost trace (LRU tie-break) -- keep what hurts most, not what's recent.
+  void set_cost_policy(bool cost_evict_) { cost_evict = cost_evict_; }
+
   [[nodiscard]] std::size_t cap() const { return capacity; }
   [[nodiscard]] std::size_t size() const { return entries.size(); }
 
-  void insert(uint64_t entry, const std::vector<uint64_t>& ips)
+  void insert(uint64_t entry, const std::vector<uint64_t>& ips, uint64_t cost = 0)
   {
     if (auto it = entry_index.find(entry); it != entry_index.end()) { // refresh
       const std::size_t slot = it->second;
@@ -44,6 +48,7 @@ public:
       }
       entries[slot].ips = ips;
       entries[slot].lru = ++tick;
+      entries[slot].cost = cost;
       if (window_indexed) {
         add_windows(slot);
       }
@@ -53,18 +58,26 @@ public:
     std::size_t slot = 0;
     if (entries.size() < capacity) {
       slot = entries.size();
-      entries.push_back({entry, ips, ++tick, {}});
-    } else { // evict LRU
-      slot = lru_victim();
+      entries.push_back({entry, ips, ++tick, cost, {}});
+    } else { // evict per policy (LRU or min-cost)
+      slot = victim();
       entry_index.erase(entries[slot].entry);
       if (window_indexed) {
         remove_windows(slot);
       }
-      entries[slot] = {entry, ips, ++tick, {}};
+      entries[slot] = {entry, ips, ++tick, cost, {}};
     }
     entry_index.emplace(entry, slot);
     if (window_indexed) {
       add_windows(slot);
+    }
+  }
+
+  // refresh a resident trace's accumulated stall cost (on re-capture)
+  void update_cost(uint64_t entry, uint64_t cost)
+  {
+    if (auto it = entry_index.find(entry); it != entry_index.end()) {
+      entries[it->second].cost = cost;
     }
   }
 
@@ -98,6 +111,7 @@ private:
     uint64_t entry = 0;
     std::vector<uint64_t> ips;
     uint64_t lru = 0;
+    uint64_t cost = 0;             // accumulated ROB-stall cycles of the trace (cost-aware eviction)
     std::vector<uint64_t> windows; // distinct window keys (only if window_indexed)
   };
 
@@ -111,11 +125,15 @@ private:
     return DEFAULT_CAPACITY;
   }
 
-  std::size_t lru_victim() const
+  std::size_t victim() const
   {
     std::size_t v = 0;
     for (std::size_t i = 1; i < entries.size(); ++i) {
-      if (entries[i].lru < entries[v].lru) {
+      if (cost_evict) {
+        if (entries[i].cost < entries[v].cost || (entries[i].cost == entries[v].cost && entries[i].lru < entries[v].lru)) {
+          v = i;
+        }
+      } else if (entries[i].lru < entries[v].lru) {
         v = i;
       }
     }
@@ -153,6 +171,7 @@ private:
   std::size_t capacity;
   unsigned window_bits = 0;
   bool window_indexed = false;
+  bool cost_evict = false;
   uint64_t tick = 0;
   std::vector<ent> entries;
   std::unordered_map<uint64_t, std::size_t> entry_index;

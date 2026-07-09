@@ -252,16 +252,58 @@ long O3_CPU::check_dib()
 void O3_CPU::drain_alt_walks()
 {
   for (auto& w : alt_walks) {
+    // real-L1I mode: issue one pending line per walk per cycle through the L1I
+    // (contends with demand for rq slots and MSHRs; misses go to L2/LLC/DRAM)
+    if (alt_walk_l1i && !w.lines_pending.empty()) {
+      CacheBus::request_type line_pkt;
+      line_pkt.v_address = champsim::address{w.lines_pending.front()};
+      line_pkt.ip = champsim::address{w.lines_pending.front()};
+      line_pkt.instr_id = 0; // no dependent instructions: response marks the line ready
+      if (L1I_bus.issue_read(line_pkt)) {
+        w.lines_pending.pop_front();
+        ++sim_stats.alt_lines_issued;
+        w.last_progress = current_time;
+      }
+    }
     while (w.idx < w.windows.size() && w.ready <= current_time) {
+      // real-L1I mode: a window may only install once its line has arrived
+      if (alt_walk_l1i
+          && w.lines_ready.count(champsim::block_number{champsim::address{w.windows[w.idx].front()}}.to<uint64_t>()) == 0) {
+        ++sim_stats.alt_line_stalls;
+        break; // pre-decode stalls on the byte fetch; retry next cycle
+      }
       // install up to alt_walk_width windows per cycle (pre-decode width)
       for (int k = 0; k < alt_walk_width && w.idx < w.windows.size(); ++k) {
+        if (alt_walk_l1i && k > 0
+            && w.lines_ready.count(champsim::block_number{champsim::address{w.windows[w.idx].front()}}.to<uint64_t>()) == 0) {
+          break;
+        }
         sim_stats.alt_installed_windows += DIB.install(w.windows[w.idx], /*prefetch=*/true);
         ++w.idx;
+        w.last_progress = current_time;
       }
       w.ready += clock_period;
     }
   }
-  alt_walks.erase(std::remove_if(std::begin(alt_walks), std::end(alt_walks), [](const auto& w) { return w.idx >= w.windows.size(); }),
+  // watchdog: abort a walk that has made no progress for a long time (e.g. a line
+  // response that never arrived).  Frees the slot and un-wedges any waiter; the
+  // one-shot diagnostic identifies the lost state for root-causing.
+  alt_walks.erase(std::remove_if(std::begin(alt_walks), std::end(alt_walks),
+                                 [this](const auto& w) {
+                                   if (w.idx >= w.windows.size()) {
+                                     return true; // complete
+                                   }
+                                   if (current_time - w.last_progress > ALT_WALK_ABORT_CYCLES * clock_period) {
+                                     ++sim_stats.alt_walk_aborts;
+                                     fmt::print("[ALT] walk abort: entry {:#x} idx {}/{} next-blk {:#x} lines_pending {} lines_ready {} cycle {}\n",
+                                                w.entry, w.idx, w.windows.size(),
+                                                champsim::block_number{champsim::address{w.windows[w.idx].front()}}.to<uint64_t>(),
+                                                w.lines_pending.size(), w.lines_ready.size(),
+                                                current_time.time_since_epoch() / clock_period);
+                                     return true; // stuck: abort
+                                   }
+                                   return false;
+                                 }),
                   std::end(alt_walks));
 }
 
@@ -277,6 +319,24 @@ bool O3_CPU::alt_window_pending(uint64_t rawip) const
     }
   }
   return false;
+}
+
+// wait-eligible variant: the walk holding the window, or nullptr -- background
+// walks (wait-cap expired: their bytes proved far) are not waited on.
+O3_CPU::alt_walk* O3_CPU::alt_pending_walk(uint64_t rawip)
+{
+  const uint64_t wtag = rawip >> dib_window_bits;
+  for (auto& w : alt_walks) {
+    if (w.background) {
+      continue;
+    }
+    for (std::size_t i = w.idx; i < w.windows.size(); ++i) {
+      if ((w.windows[i].front() >> dib_window_bits) == wtag) {
+        return &w;
+      }
+    }
+  }
+  return nullptr;
 }
 
 // ALT trace-fill trigger: a demand u-op-cache miss PC probes the metadata trace
@@ -302,6 +362,7 @@ void O3_CPU::do_alt_trigger(uint64_t alt_pc)
   alt_walk w;
   w.entry = entry;
   w.ready = current_time + alt_walk_delay_cycles * clock_period;
+  w.last_progress = current_time;
   uint64_t last = 0;
   bool have_last = false;
   for (uint64_t raw : *ips) { // group the trace's ips into distinct aligned windows, in order
@@ -322,6 +383,22 @@ void O3_CPU::do_alt_trigger(uint64_t alt_pc)
       break;
     }
   }
+  // real-L1I mode: collect the unique cache lines of the remaining windows; the
+  // walk issues them through the L1I (run-lengths known up front -> line-level MLP)
+  if (alt_walk_l1i) {
+    uint64_t last_blk = 0;
+    bool have_blk = false;
+    for (std::size_t i = w.idx; i < w.windows.size(); ++i) {
+      const uint64_t rep = w.windows[i].front();
+      const uint64_t blk = champsim::block_number{champsim::address{rep}}.to<uint64_t>();
+      if (have_blk && blk == last_blk) {
+        continue;
+      }
+      have_blk = true;
+      last_blk = blk;
+      w.lines_pending.push_back(rep);
+    }
+  }
   alt_walks.push_back(std::move(w));
   ++sim_stats.alt_triggers;
 }
@@ -340,9 +417,21 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   // placed before any counter so re-checks are side-effect-free.
   if (fill_mode == fill_mode_type::ALT && !hit && !warmup) {
     do_alt_trigger(instr.ip.to<uint64_t>());
-    if (alt_walk_wait && alt_window_pending(instr.ip.to<uint64_t>())) {
-      ++sim_stats.alt_wait_cycles;
-      return; // dib_checked stays false -> retried next cycle (hit-under-fill)
+    // wait-cap: wait on the fill buffer, not on DRAM.  An instruction stalls at
+    // most alt_walk_wait_cap cycles on a pending window (enough to cover an
+    // L1I-hit fill); if the cap expires the bytes proved far, so the WHOLE WALK
+    // is demoted to a background prefetcher -- no instruction waits on it again,
+    // demand proceeds through build mode (its fetch MSHR-merges with the walk's
+    // line requests) while the walk keeps installing ahead.  Cap 0 = unbounded.
+    if (alt_walk_wait) {
+      if (alt_walk* holder = alt_pending_walk(instr.ip.to<uint64_t>()); holder != nullptr) {
+        if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
+          ++instr.dib_wait_cycles;
+          ++sim_stats.alt_wait_cycles;
+          return; // dib_checked stays false -> retried next cycle (hit-under-fill)
+        }
+        holder->background = true; // bytes are far: stop waiting on this walk
+      }
     }
   }
   if (was_prefetched) {
@@ -447,9 +536,15 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   if (trace_stall_enable && !warmup) {
     const std::size_t before = stall.get_traces().size();
     stall.on_dib(instr.ip.to<uint64_t>(), hit, sim_stats);
-    if (fill_mode != fill_mode_type::OFF && stall.get_traces().size() > before) {
-      const auto& t = stall.get_traces().back();
-      fill_store.insert(t.entry, t.ips);
+    if (fill_mode != fill_mode_type::OFF) {
+      if (stall.get_traces().size() > before) {
+        const auto& t = stall.get_traces().back();
+        fill_store.insert(t.entry, t.ips, t.cost);
+      } else if (stall.touched()) {
+        // re-capture of a stored stretch: refresh its accumulated cost so the
+        // cost-aware eviction policy sees current values
+        fill_store.update_cost(stall.touch_entry(), stall.touch_cost());
+      }
     }
   }
 
@@ -509,7 +604,10 @@ long O3_CPU::fetch_instruction()
     // Issue to L1I
     auto success = do_fetch_instruction(l1i_req_begin, l1i_req_end);
     if (success) {
-      std::for_each(l1i_req_begin, l1i_req_end, [](auto& x) { x.fetch_issued = true; });
+      std::for_each(l1i_req_begin, l1i_req_end, [t = current_time](auto& x) {
+        x.fetch_issued = true;
+        x.fetch_issue_time = t; // completion latency > L1I hit => the fetch missed L1I
+      });
       ++progress;
     }
 
@@ -987,10 +1085,25 @@ long O3_CPU::handle_memory_return()
        fetch_bw.has_remaining() && l1i_bw.has_remaining() && !L1I_bus.lower_level->returned.empty(); l1i_bw.consume()) {
     auto& l1i_entry = L1I_bus.lower_level->returned.front();
 
+    // real-L1I walk mode: any arriving line (walk-issued or demand, incl. MSHR merges)
+    // marks that block ready in all in-flight walks
+    if (fill_mode == fill_mode_type::ALT && alt_walk_l1i && !alt_walks.empty()) {
+      const uint64_t blk = champsim::block_number{l1i_entry.v_address}.to<uint64_t>();
+      for (auto& w : alt_walks) {
+        w.lines_ready.insert(blk);
+      }
+    }
+
     while (fetch_bw.has_remaining() && !l1i_entry.instr_depend_on_me.empty()) {
       auto fetched = std::find_if(std::begin(IFETCH_BUFFER), std::end(IFETCH_BUFFER), ooo_model_instr::matches_id(l1i_entry.instr_depend_on_me.front()));
       if (fetched != std::end(IFETCH_BUFFER) && champsim::block_number{fetched->ip} == champsim::block_number{l1i_entry.v_address} && fetched->fetch_issued) {
         fetched->fetch_completed = true;
+        // L1I-miss admission gate: a fetch that took longer than an L1I hit round
+        // trip missed L1I; mark the segmenter's in-flight stretch (loose
+        // attribution, same style as the ROB-drain note_stall signal).
+        if (trace_stall_enable && !warmup && current_time - fetched->fetch_issue_time > STALL_L1I_MISS_CYCLES * clock_period) {
+          stall.note_l1i_miss();
+        }
         fetch_bw.consume();
         ++progress;
 

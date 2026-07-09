@@ -114,8 +114,8 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.stg_dynamic_uops_covered, stats.stg_dynamic_uops,
                               ::print_ratio(100 * static_cast<long long>(stats.stg_dynamic_uops_covered), static_cast<long long>(stats.stg_dynamic_uops))));
 
-  lines.push_back(fmt::format("{} trace-stall: traces {} (of {} candidates) dedup-hits {} stored-uops {}", stats.name, stats.stall_traces,
-                              stats.stall_traces_candidates, stats.stall_dedup, stats.stall_stored_uops));
+  lines.push_back(fmt::format("{} trace-stall: traces {} (of {} candidates) dedup-hits {} stored-uops {} l1i-gated {}", stats.name, stats.stall_traces,
+                              stats.stall_traces_candidates, stats.stall_dedup, stats.stall_stored_uops, stats.stall_gated_l1i));
   lines.push_back(fmt::format("{} trace-stall coverage: unique IPs {}/{} ({}%) dynamic uops {}/{} ({}%)", stats.name, stats.stall_unique_ips_covered,
                               stats.stall_unique_ips_seen,
                               ::print_ratio(100 * static_cast<long long>(stats.stall_unique_ips_covered), static_cast<long long>(stats.stall_unique_ips_seen)),
@@ -155,9 +155,12 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
     lines.push_back(fmt::format("{} trace-stall top-by-cost avg-len: {}", stats.name, a(stats.stall_cost_avglen)));
   }
 
-  lines.push_back(fmt::format("{} trace-alt: triggers {} dropped {} installed-windows {} late-misses {} useful-hits {} wait-cycles {}", stats.name,
-                              stats.alt_triggers, stats.alt_drops, stats.alt_installed_windows, stats.alt_late_misses, stats.alt_useful_hits,
-                              stats.alt_wait_cycles));
+  lines.push_back(fmt::format("{} trace-alt: triggers {} dropped {} installed-windows {} late-misses {} useful-hits {} wait-cycles {} lines-issued {} line-stalls {}",
+                              stats.name, stats.alt_triggers, stats.alt_drops, stats.alt_installed_windows, stats.alt_late_misses, stats.alt_useful_hits,
+                              stats.alt_wait_cycles, stats.alt_lines_issued, stats.alt_line_stalls));
+  if (stats.alt_walk_aborts > 0) {
+    lines.push_back(fmt::format("{} trace-alt WARNING: walk-aborts {}", stats.name, stats.alt_walk_aborts));
+  }
 
   lines.push_back(fmt::format("{} trace-seg loss(dyn): covered-final {} latency {} | no-trigger {} overflow {} bad-layout {} short {}", stats.name,
                               stats.seg_dyn_covered_final, stats.seg_dyn_covered_final - stats.seg_dynamic_uops_covered, stats.seg_dyn_lost_no_trigger,

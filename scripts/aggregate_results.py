@@ -25,7 +25,7 @@ RE_TIGHT = re.compile(r'frontend-loss backend-idle \(tight\): steady (\d+) recov
 RE_STG = re.compile(r'trace-stg: loop (\d+) function (\d+) dedup-hits (\d+) entangled (\d+) '
                     r'dropped: bad-layout (\d+) overflow (\d+) short (\d+) stored-uops (\d+)', re.M)
 RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
-RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)', re.M)
+RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)(?: l1i-gated (\d+))?', re.M)
 RE_STALL_COV = re.compile(r'trace-stall coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
 BKT_LABELS = [16, 32, 64, 128, 256, 512, 1024]
 _bkt = ' '.join(fr'{n}=([\d.-]+)%' for n in BKT_LABELS)
@@ -42,7 +42,8 @@ RE_COV_AVGOCC = re.compile(r'trace-stall top-by-coverage avg-occ: ' + _bktv, re.
 RE_COV_AVGLEN = re.compile(r'trace-stall top-by-coverage avg-len: ' + _bktv, re.M)
 RE_CST_AVGOCC = re.compile(r'trace-stall top-by-cost avg-occ: ' + _bktv, re.M)
 RE_CST_AVGLEN = re.compile(r'trace-stall top-by-cost avg-len: ' + _bktv, re.M)
-RE_ALT = re.compile(r'trace-alt: triggers (\d+) dropped (\d+) installed-windows (\d+) late-misses (\d+)(?: useful-hits (\d+))?(?: wait-cycles (\d+))?', re.M)
+RE_ALT = re.compile(r'trace-alt: triggers (\d+) dropped (\d+) installed-windows (\d+) late-misses (\d+)(?: useful-hits (\d+))?(?: wait-cycles (\d+))?'
+                    r'(?: lines-issued (\d+) line-stalls (\d+))?', re.M)
 
 
 def parse_file(path):
@@ -86,6 +87,7 @@ def parse_file(path):
     if st:
         d['stall_traces'], d['stall_candidates'] = int(st.group(1)), int(st.group(2))
         d['stall_dedup'], d['stall_stored_uops'] = int(st.group(3)), int(st.group(4))
+        d['stall_l1i_gated'] = int(st.group(5)) if st.group(5) else None
     stc = RE_STALL_COV.search(txt)
     if stc:
         d['stall_uniq_cov'], d['stall_uniq_seen'] = int(stc.group(1)), int(stc.group(2))
@@ -125,6 +127,8 @@ def parse_file(path):
         d['alt_windows'], d['alt_late'] = int(al.group(3)), int(al.group(4))
         d['alt_useful'] = int(al.group(5)) if al.group(5) else None
         d['alt_wait'] = int(al.group(6)) if al.group(6) else None
+        d['alt_lines'] = int(al.group(7)) if al.group(7) else None
+        d['alt_line_stalls'] = int(al.group(8)) if al.group(8) else None
     for key, rx in (('s_oo', RE_OCC_AVGOCC), ('s_ol', RE_OCC_AVGLEN), ('s_co', RE_COV_AVGOCC), ('s_cl', RE_COV_AVGLEN),
                     ('s_ko', RE_CST_AVGOCC), ('s_kl', RE_CST_AVGLEN)):
         mm2 = rx.search(txt)
@@ -193,6 +197,9 @@ def aggregate(path, pattern, include):
         kept = amean([r['stall_traces'] for r in have_stall])
         print(f"traces captured:   {kept:,.0f}   of {cand:,.0f} candidates ({pct(kept, cand):.1f}% kept after filter)   "
             f"(dedup re-hits {amean([r['stall_dedup'] for r in have_stall]):,.0f})")
+        gated = [r['stall_l1i_gated'] for r in have_stall if r.get('stall_l1i_gated') is not None]
+        if gated and amean(gated) > 0:
+            print(f"l1i-gated out:     {amean(gated):,.0f} costly stretches (no L1I miss observed)")
         print(f"stored u-ops:      {amean([r['stall_stored_uops'] for r in have_stall]):,.0f}")
         cov_have = [r for r in have_stall if 'stall_dyn_tot' in r]
         if cov_have:
@@ -256,6 +263,10 @@ def aggregate(path, pattern, include):
         if waits:
             wpct = amean([pct(r['alt_wait'], r['cycles']) for r in have_alt if r.get('alt_wait') is not None and r['cycles']])
             print(f"wait cycles:       {amean(waits):,.0f}   ({wpct:.2f}% of runtime; hit-under-fill stalls)")
+        lns = [r['alt_lines'] for r in have_alt if r.get('alt_lines') is not None]
+        if lns and amean(lns) > 0:
+            lst = amean([r['alt_line_stalls'] for r in have_alt if r.get('alt_line_stalls') is not None])
+            print(f"L1I lines issued:  {amean(lns):,.0f}   (walk line-stall cycles {lst:,.0f})")
 
     have_fe = [r for r in rows if 'ti_total' in r]
     if not have_fe:

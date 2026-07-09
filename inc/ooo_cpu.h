@@ -26,6 +26,7 @@
 #include <bitset>
 #include <cstdlib>
 #include <deque>
+#include <set>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -172,12 +173,23 @@ public:
     std::vector<std::vector<uint64_t>> windows; // per-window ip groups, in trace order
     std::size_t idx = 0;                        // next window to install
     uint64_t entry = 0;                         // trace entry PC (dedup)
+    // real-L1I mode (trace_walk_l1i): the walk fetches its instruction bytes
+    // through the actual L1I (misses propagate to L2/LLC/DRAM); a window may
+    // only install once its cache line has arrived.
+    std::deque<uint64_t> lines_pending;  // representative ip per unique line, not yet issued
+    std::set<uint64_t> lines_ready;      // block numbers whose bytes have arrived
+    champsim::chrono::clock::time_point last_progress{}; // watchdog: last install/issue (walk aborted if stuck)
+    bool background = false; // wait-cap expired on this walk: demand no longer waits on it (pure background prefetch)
   };
   std::deque<alt_walk> alt_walks;
   std::size_t alt_walk_max = 2;
   int alt_walk_delay_cycles = 5;
   int alt_walk_width = 1;      // windows installed per walk per cycle (pre-decode width)
   bool alt_walk_wait = false;  // miss on a walk-pending window stalls fetch (hit-under-fill) instead of switching to build
+  bool alt_walk_l1i = false;   // walk fetches its bytes through the real L1I (install gated on line arrival)
+  int alt_walk_wait_cap = 16;  // max cycles an instruction waits on a pending window before falling to build (0 = unbounded)
+  static constexpr int ALT_WALK_ABORT_CYCLES = 4096; // watchdog: abort a walk with no progress for this long
+  static constexpr int STALL_L1I_MISS_CYCLES = 8;    // fetch completion slower than this => it missed L1I (hit ~4-6 cyc end-to-end)
   unsigned dib_window_bits = 0;
 
   // Resolve the trace-fill mode from the "trace_fill" config field, overridden
@@ -270,6 +282,7 @@ public:
   void drain_alt_walks();
   void do_alt_trigger(uint64_t alt_pc);
   [[nodiscard]] bool alt_window_pending(uint64_t rawip) const;
+  [[nodiscard]] alt_walk* alt_pending_walk(uint64_t rawip); // like alt_window_pending, but skips background walks
   long fetch_instruction();
   long promote_to_decode();
   long decode_instruction();
@@ -393,6 +406,11 @@ public:
         depth = std::atoi(e); // env override for sweeps
       }
       stall.set_max_uops(depth);
+      int l1i_gate = b.m_trace_stall_l1i_gate;
+      if (const char* e = std::getenv("PROMETHEUS_STALL_L1I_GATE"); e != nullptr && *e != '\0') {
+        l1i_gate = std::atoi(e); // only commit stretches that also missed L1I
+      }
+      stall.set_l1i_gate(l1i_gate != 0);
     }
     fill_mode = resolve_fill_mode(b.m_trace_fill);
     if (fill_mode != fill_mode_type::OFF) {
@@ -427,6 +445,19 @@ public:
       if (const char* e = std::getenv("PROMETHEUS_WALK_WAIT"); e != nullptr && *e != '\0') {
         alt_walk_wait = (std::atoi(e) != 0); // stall fetch on walk-pending misses
       }
+      alt_walk_l1i = (b.m_trace_walk_l1i != 0);
+      if (const char* e = std::getenv("PROMETHEUS_WALK_L1I"); e != nullptr && *e != '\0') {
+        alt_walk_l1i = (std::atoi(e) != 0); // walk fetches bytes through the real L1I
+      }
+      alt_walk_wait_cap = b.m_trace_walk_wait_cap;
+      if (const char* e = std::getenv("PROMETHEUS_WAIT_CAP"); e != nullptr && *e != '\0') {
+        alt_walk_wait_cap = std::atoi(e); // max wait cycles before falling to build (0 = unbounded)
+      }
+      int cost_evict = b.m_trace_store_cost_evict;
+      if (const char* e = std::getenv("PROMETHEUS_STORE_COST_EVICT"); e != nullptr && *e != '\0') {
+        cost_evict = std::atoi(e); // evict min-stall-cost trace instead of LRU
+      }
+      fill_store.set_cost_policy(cost_evict != 0);
     }
   }
 };

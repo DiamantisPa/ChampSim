@@ -37,6 +37,7 @@ struct cpu_stats {
   uint64_t stall_traces = 0;              // distinct traces committed (passed the occurrence filter)
   uint64_t stall_traces_candidates = 0;   // distinct stretch-start IPs seen (total, before filtering)
   uint64_t stall_dedup = 0;              // costly stretches whose start IP was already captured
+  uint64_t stall_gated_l1i = 0;          // costly stretches rejected by the L1I admission gate (no L1I miss observed)
   uint64_t stall_stored_uops = 0;
   uint64_t stall_dynamic_uops = 0;
   uint64_t stall_dynamic_uops_covered = 0;
@@ -71,6 +72,9 @@ struct cpu_stats {
   uint64_t alt_late_misses = 0;       // demand misses whose window was in a walk still in flight (too slow)
   uint64_t alt_useful_hits = 0;       // demand hits on walk-installed windows (walk accuracy numerator)
   uint64_t alt_wait_cycles = 0;       // fetch-stall cycles waiting for a walk-pending window (hit-under-fill)
+  uint64_t alt_lines_issued = 0;      // real-L1I mode: cache-line reads the walks issued through the L1I
+  uint64_t alt_line_stalls = 0;       // real-L1I mode: walk-cycles stalled waiting for a line to arrive
+  uint64_t alt_walk_aborts = 0;       // watchdog: walks aborted after making no progress (lost line response)
   uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)

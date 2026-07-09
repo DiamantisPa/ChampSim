@@ -109,7 +109,9 @@ struct ooo_model_instr : champsim::program_ordered<ooo_model_instr> {
   champsim::address branch_target{};
 
   bool dib_checked = false;
+  uint16_t dib_wait_cycles = 0; // ALT wait-on-pending: cycles spent stalled at the u-op-cache check
   bool fetch_issued = false;
+  champsim::chrono::clock::time_point fetch_issue_time{}; // L1I issue timestamp (L1I-miss detection for the admission gate)
   bool fetch_completed = false;
   bool decoded = false;
   bool scheduled = false;

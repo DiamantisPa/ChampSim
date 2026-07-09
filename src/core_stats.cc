@@ -19,6 +19,7 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.stall_traces -= rhs.stall_traces;
   lhs.stall_traces_candidates -= rhs.stall_traces_candidates;
   lhs.stall_dedup -= rhs.stall_dedup;
+  lhs.stall_gated_l1i -= rhs.stall_gated_l1i;
   lhs.stall_stored_uops -= rhs.stall_stored_uops;
   lhs.stall_dynamic_uops -= rhs.stall_dynamic_uops;
   lhs.stall_dynamic_uops_covered -= rhs.stall_dynamic_uops_covered;
@@ -58,6 +59,9 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.alt_late_misses -= rhs.alt_late_misses;
   lhs.alt_useful_hits -= rhs.alt_useful_hits;
   lhs.alt_wait_cycles -= rhs.alt_wait_cycles;
+  lhs.alt_lines_issued -= rhs.alt_lines_issued;
+  lhs.alt_line_stalls -= rhs.alt_line_stalls;
+  lhs.alt_walk_aborts -= rhs.alt_walk_aborts;
   lhs.fe_stall_steady -= rhs.fe_stall_steady;
   lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
   lhs.rob_idle_steady -= rhs.rob_idle_steady;

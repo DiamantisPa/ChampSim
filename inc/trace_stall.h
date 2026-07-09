@@ -49,14 +49,31 @@ public:
     }
   }
 
+  // L1I admission gate: when enabled, a costly stretch commits only if an L1I
+  // miss was observed during it (note_l1i_miss).  Selects the stretches where a
+  // zero-latency u-op replay saves the most: byte fetch AND decode.
+  void set_l1i_gate(bool g) { l1i_gate_ = g; }
+
+  // an instruction fetch belonging to the fetch stream completed slower than an
+  // L1I hit while this stretch was recording (loose attribution, like note_stall)
+  void note_l1i_miss()
+  {
+    if (recording) {
+      l1i_missed_ = true;
+    }
+  }
+
   // per instruction at the u-op-cache check (fetch stage).  hit = final DIB hit.
   void on_dib(uint64_t ip, bool hit, cpu_stats& stats)
   {
+    touched_ = false;
     cov.observe(ip, stats.stall_dynamic_uops, stats.stall_dynamic_uops_covered, stats.stall_unique_ips_seen);
     if (hit) {
       if (recording) {
-        if (costly) {
+        if (costly && (!l1i_gate_ || l1i_missed_)) {
           commit(stats);
+        } else if (costly) {
+          ++stats.stall_gated_l1i; // costly but no L1I miss observed: gated out
         }
         reset();
       }
@@ -88,6 +105,12 @@ public:
 
   [[nodiscard]] bool covers(uint64_t ip) const { return cov.covers(ip); }
   [[nodiscard]] const std::vector<trace>& get_traces() const { return traces; }
+
+  // did this on_dib call commit or re-capture a stretch? (feed hook: lets the
+  // fill store refresh a stored trace's cost on re-capture)
+  [[nodiscard]] bool touched() const { return touched_; }
+  [[nodiscard]] uint64_t touch_entry() const { return touch_entry_; }
+  [[nodiscard]] uint64_t touch_cost() const { return touch_cost_; }
 
   // end-of-run Pareto analysis: cumulative dynamic weight (occurrences x length)
   // captured by the top-N traces, ranked by occurrence, by dynamic weight, and by
@@ -163,6 +186,9 @@ private:
       ++traces[it->second].occurrences; // re-capture of an already-stored stretch
       traces[it->second].cost += stretch_cost;
       ++stats.stall_dedup;
+      touched_ = true; // expose the refreshed cost to the fill feed
+      touch_entry_ = start_ip;
+      touch_cost_ = traces[it->second].cost;
       return;
     }
     // candidate stretch: accumulate occurrences until it clears the filter threshold
@@ -184,6 +210,9 @@ private:
     }
     stats.stall_stored_uops += tr.ips.size();
     ++stats.stall_traces;
+    touched_ = true;
+    touch_entry_ = start_ip;
+    touch_cost_ = tr.cost;
     start_index.emplace(start_ip, traces.size());
     traces.push_back(std::move(tr));
     pending.erase(pit);
@@ -193,6 +222,7 @@ private:
   {
     recording = false;
     costly = false;
+    l1i_missed_ = false;
     stretch_cost = 0;
     buf.clear();
   }
@@ -215,6 +245,11 @@ private:
   std::size_t max_uops;
   bool recording = false;
   bool costly = false;
+  bool l1i_gate_ = false;    // admission gate: require an L1I miss in the stretch
+  bool l1i_missed_ = false;  // an L1I miss was observed during the in-flight stretch
+  bool touched_ = false;     // this on_dib committed or re-captured a stretch
+  uint64_t touch_entry_ = 0;
+  uint64_t touch_cost_ = 0;
   uint64_t start_ip = 0;
   uint64_t stretch_cost = 0; // ROB-stall cycles in the in-flight stretch
   std::vector<uint64_t> buf;

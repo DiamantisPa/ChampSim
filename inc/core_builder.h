@@ -52,6 +52,10 @@ struct core_builder_base {
   int m_trace_walk_max{2};             // alt fill: max concurrent walks
   int m_trace_walk_width{1};           // alt fill: windows installed per walk per cycle
   int m_trace_walk_wait{0};            // alt fill: 1 = miss on a walk-pending window stalls fetch instead of switching to build
+  int m_trace_walk_l1i{0};             // alt fill: 1 = walk fetches bytes through the real L1I (installs gated on line arrival)
+  int m_trace_walk_wait_cap{16};       // alt fill: max cycles an instruction waits on a pending window (0 = unbounded)
+  int m_trace_stall_l1i_gate{0};       // stall segmenter: 1 = only commit stretches that also missed L1I
+  int m_trace_store_cost_evict{0};     // trace store: 1 = evict minimum-stall-cost trace instead of LRU
   std::size_t m_ifetch_buffer_size{1};
   std::size_t m_decode_buffer_size{1};
   std::size_t m_dispatch_buffer_size{1};
@@ -196,6 +200,33 @@ public:
    * switch), instead of falling to build mode.  Default 0.
    */
   self_type& trace_walk_wait(int trace_walk_wait_);
+
+  /**
+   * ALT fill mode: when 1, the walk issues real read requests for its cache
+   * lines through the L1I (misses propagate down the hierarchy) and a window
+   * may only install after its line arrives.  Default 0 (bytes are free).
+   */
+  self_type& trace_walk_l1i(int trace_walk_l1i_);
+
+  /**
+   * ALT fill mode: maximum cycles an instruction stalls waiting on a
+   * walk-pending window before falling back to build mode ("wait on the fill
+   * buffer, not on DRAM").  0 = unbounded.  Default 16.
+   */
+  self_type& trace_walk_wait_cap(int trace_walk_wait_cap_);
+
+  /**
+   * Stall segmenter L1I admission gate: when 1, a costly stretch commits only
+   * if an L1I miss was observed during it -- selects stretches where u-op
+   * replay saves byte fetch AND decode.  Default 0.
+   */
+  self_type& trace_stall_l1i_gate(int trace_stall_l1i_gate_);
+
+  /**
+   * Trace-store replacement: when 1, evict the minimum-stall-cost trace
+   * (LRU tie-break) instead of plain LRU.  Default 0.
+   */
+  self_type& trace_store_cost_evict(int trace_store_cost_evict_);
 
   /**
    * Specify the maximum size of the instruction fetch buffer.
@@ -462,6 +493,34 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_walk_wait(int trace_walk_wait_) -> self_type&
 {
   m_trace_walk_wait = trace_walk_wait_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_l1i(int trace_walk_l1i_) -> self_type&
+{
+  m_trace_walk_l1i = trace_walk_l1i_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_wait_cap(int trace_walk_wait_cap_) -> self_type&
+{
+  m_trace_walk_wait_cap = trace_walk_wait_cap_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_stall_l1i_gate(int trace_stall_l1i_gate_) -> self_type&
+{
+  m_trace_stall_l1i_gate = trace_stall_l1i_gate_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_store_cost_evict(int trace_store_cost_evict_) -> self_type&
+{
+  m_trace_store_cost_evict = trace_store_cost_evict_;
   return *this;
 }
 
