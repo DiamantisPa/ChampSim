@@ -157,7 +157,7 @@ public:
   //            (no demand fill; the UCP-style "fast refill" trigger)
   //   PERFECT- upper bound: hit on ANY window the active builder covers (unbounded,
   //            proactive, no store) -- the segmentation algorithm's IPC ceiling
-  enum class fill_mode_type { OFF, MISS, EVERY, WINDOW, FLUSH, PERFECT, PARALLEL, ALT };
+  enum class fill_mode_type { OFF, MISS, EVERY, WINDOW, FLUSH, PERFECT, PARALLEL, ALT, HEAD, CHAIN };
   trace_store fill_store{};
   fill_mode_type fill_mode{fill_mode_type::OFF};
 
@@ -179,6 +179,7 @@ public:
     std::deque<uint64_t> lines_pending;  // representative ip per unique line, not yet issued
     std::set<uint64_t> lines_ready;      // block numbers whose bytes have arrived
     champsim::chrono::clock::time_point last_progress{}; // watchdog: last install/issue (walk aborted if stuck)
+    champsim::chrono::clock::time_point probe_time{};    // CHAIN: trigger time (slack = first demand touch - this)
     bool background = false; // wait-cap expired on this walk: demand no longer waits on it (pure background prefetch)
   };
   std::deque<alt_walk> alt_walks;
@@ -188,6 +189,37 @@ public:
   bool alt_walk_wait = false;  // miss on a walk-pending window stalls fetch (hit-under-fill) instead of switching to build
   bool alt_walk_l1i = false;   // walk fetches its bytes through the real L1I (install gated on line arrival)
   int alt_walk_wait_cap = 16;  // max cycles an instruction waits on a pending window before falling to build (0 = unbounded)
+  // HEAD fill mode: trace = instantly-servable head (first head_uops uops stored
+  // as uops, ~8B each) + a fetch manifest for the tail (the next tail_targets
+  // taken-branch targets, ~8B each).  Head hits feed the backend directly; the
+  // tail walk launches the same cycle to hide its fetch+decode latency behind
+  // head consumption.
+  int head_uops = 8;     // uops stored per trace head (served instantly)
+  int tail_targets = 3;  // taken targets in the manifest: walk reach (<0 = unlimited)
+
+  // CHAIN fill mode: metadata-only trace cache ([tag | window deltas | valid],
+  // ~9B/entry), probed by ENTRY PC with each predicted pc at IFETCH enqueue (the
+  // lookahead point).  A hit launches a walk that fetches the trace's <=
+  // meta_windows windows through the real L1I and pre-decodes them into a small
+  // trace-uop staging BUFFER (not the u-op cache -- no pollution).  A demand hit
+  // in the buffer serves the uops and PROMOTES the window into the u-op cache as
+  // a demand-class fill.
+  struct uop_buf_entry {
+    uint64_t tag = 0;                                  // window tag
+    std::vector<uint64_t> ips;                         // the window's uops (promotion payload)
+    champsim::chrono::clock::time_point probe_time{};  // walk trigger time (slack stat)
+  };
+  std::deque<uop_buf_entry> uop_buffer; // trace-uop staging buffer (FIFO)
+  int uop_buffer_windows = 16;          // capacity in windows (16 x 8 uops x 8B = 1KB; 0 = install direct to DIB)
+  int meta_windows = 4;                 // manifest capacity: window slots per trace (entry + deltas)
+  // deep probe: scan the instruction supply up to N instructions AHEAD of the
+  // transfer point (models the decoupled BP/FTQ running ahead of fetch -- the
+  // lead a real FTQ-tail probe has over the fetch-point u-op-cache lookup, which
+  // this simulator's collapsed frontend otherwise erases).  The cursor resets on
+  // a branch misprediction (= FTQ flush), so recovery lead rebuilds gradually.
+  // 0 = probe at enqueue only (no lead).
+  int chain_probe_ahead = 0;
+  std::size_t chain_probe_cursor = 0; // next unprobed input_queue position (relative to front)
   static constexpr int ALT_WALK_ABORT_CYCLES = 4096; // watchdog: abort a walk with no progress for this long
   static constexpr int STALL_L1I_MISS_CYCLES = 8;    // fetch completion slower than this => it missed L1I (hit ~4-6 cyc end-to-end)
   unsigned dib_window_bits = 0;
@@ -216,6 +248,12 @@ public:
     }
     if (v == "alt") {
       return fill_mode_type::ALT;
+    }
+    if (v == "head") {
+      return fill_mode_type::HEAD;
+    }
+    if (v == "chain") {
+      return fill_mode_type::CHAIN;
     }
     if (v == "miss" || v == "1") {
       return fill_mode_type::MISS;
@@ -281,6 +319,10 @@ public:
   long check_dib();
   void drain_alt_walks();
   void do_alt_trigger(uint64_t alt_pc);
+  void do_head_trigger(const std::vector<uint64_t>& ips, std::size_t start_idx);
+  void do_chain_trigger(const std::vector<uint64_t>& ips);
+  void uop_buffer_push(const std::vector<uint64_t>& window_ips, champsim::chrono::clock::time_point probe_time);
+  [[nodiscard]] std::vector<uint64_t> chain_encode(const std::vector<uint64_t>& ips, bool& truncated, bool& encodable) const;
   [[nodiscard]] bool alt_window_pending(uint64_t rawip) const;
   [[nodiscard]] alt_walk* alt_pending_walk(uint64_t rawip); // like alt_window_pending, but skips background walks
   long fetch_instruction();
@@ -420,7 +462,7 @@ public:
         trace_stg_enable = true;
       }
       const bool window_indexed = (fill_mode == fill_mode_type::WINDOW || fill_mode == fill_mode_type::FLUSH || fill_mode == fill_mode_type::PARALLEL
-                                   || fill_mode == fill_mode_type::ALT);
+                                   || fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD);
       fill_store.configure(static_cast<unsigned>(champsim::lg2(b.m_dib_window)), window_indexed);
       dib_window_bits = static_cast<unsigned>(champsim::lg2(b.m_dib_window));
       // capacity/walk knobs: JSON value, overridden by env (env > JSON > default)
@@ -458,6 +500,26 @@ public:
         cost_evict = std::atoi(e); // evict min-stall-cost trace instead of LRU
       }
       fill_store.set_cost_policy(cost_evict != 0);
+      head_uops = (b.m_trace_head_uops < 0) ? 0 : b.m_trace_head_uops;
+      if (const char* e = std::getenv("PROMETHEUS_HEAD_UOPS"); e != nullptr && *e != '\0') {
+        head_uops = std::max(0, std::atoi(e)); // instantly-servable head length
+      }
+      tail_targets = b.m_trace_tail_targets;
+      if (const char* e = std::getenv("PROMETHEUS_TAIL_TARGETS"); e != nullptr && *e != '\0') {
+        tail_targets = std::atoi(e); // manifest reach in taken targets (<0 = unlimited)
+      }
+      uop_buffer_windows = (b.m_trace_uop_buffer < 0) ? 0 : b.m_trace_uop_buffer;
+      if (const char* e = std::getenv("PROMETHEUS_UOP_BUFFER"); e != nullptr && *e != '\0') {
+        uop_buffer_windows = std::max(0, std::atoi(e)); // staging buffer capacity in windows
+      }
+      meta_windows = (b.m_trace_meta_windows < 1) ? 1 : b.m_trace_meta_windows;
+      if (const char* e = std::getenv("PROMETHEUS_META_WINDOWS"); e != nullptr && *e != '\0') {
+        meta_windows = std::max(1, std::atoi(e)); // manifest window slots per trace
+      }
+      chain_probe_ahead = (b.m_trace_probe_ahead < 0) ? 0 : b.m_trace_probe_ahead;
+      if (const char* e = std::getenv("PROMETHEUS_PROBE_AHEAD"); e != nullptr && *e != '\0') {
+        chain_probe_ahead = std::max(0, std::atoi(e)); // deep-probe lead in instructions (0 = enqueue only)
+      }
     }
   }
 };

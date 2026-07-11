@@ -161,6 +161,10 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
   if (stats.alt_walk_aborts > 0) {
     lines.push_back(fmt::format("{} trace-alt WARNING: walk-aborts {}", stats.name, stats.alt_walk_aborts));
   }
+  lines.push_back(fmt::format("{} trace-chain: unencodable {} truncated {} buffer-hits {} buffer-evicted-unused {} slack(4/8/16/32/64/inf): {} {} {} {} {} {}",
+                              stats.name, stats.chain_unencodable, stats.chain_truncated, stats.chain_buf_hits, stats.chain_buf_evict_unused,
+                              stats.chain_slack[0], stats.chain_slack[1], stats.chain_slack[2], stats.chain_slack[3], stats.chain_slack[4],
+                              stats.chain_slack[5]));
 
   lines.push_back(fmt::format("{} trace-seg loss(dyn): covered-final {} latency {} | no-trigger {} overflow {} bad-layout {} short {}", stats.name,
                               stats.seg_dyn_covered_final, stats.seg_dyn_covered_final - stats.seg_dynamic_uops_covered, stats.seg_dyn_lost_no_trigger,

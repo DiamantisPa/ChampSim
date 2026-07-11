@@ -143,11 +143,38 @@ void O3_CPU::initialize_instruction()
 
     stop_fetch = do_init_instruction(input_queue.front());
 
+    // CHAIN trace-fill, no deep probe (probe_ahead == 0), or an instruction the
+    // deep cursor has not reached yet (post-mispredict rebuild): probe at enqueue.
+    if (fill_mode == fill_mode_type::CHAIN && !warmup && chain_probe_cursor == 0) {
+      if (const auto* ips = fill_store.lookup_entry(input_queue.front().ip.to<uint64_t>()); ips != nullptr && !ips->empty()) {
+        do_chain_trigger(*ips);
+      }
+    }
+
     // Add to IFETCH_BUFFER
     IFETCH_BUFFER.push_back(input_queue.front());
     input_queue.pop_front();
+    if (chain_probe_cursor > 0) {
+      --chain_probe_cursor; // the cursor indexes relative to the queue front
+    }
 
     IFETCH_BUFFER.back().ready_time = current_time;
+  }
+
+  // CHAIN deep probe: advance the cursor through the instruction supply, probing
+  // each pc once, up to chain_probe_ahead instructions beyond the transfer point.
+  // This models the decoupled BP/FTQ running ahead of fetch -- the lead a real
+  // FTQ-tail probe has over the fetch-point u-op-cache lookup.  The cursor is
+  // reset on branch mispredictions (= FTQ flush), so recovery lead rebuilds at
+  // probe bandwidth, honestly.
+  if (fill_mode == fill_mode_type::CHAIN && !warmup && chain_probe_ahead > 0) {
+    const std::size_t limit = std::min(std::size(input_queue), static_cast<std::size_t>(chain_probe_ahead));
+    for (champsim::bandwidth probe_bw{FETCH_WIDTH}; probe_bw.has_remaining() && chain_probe_cursor < limit; probe_bw.consume()) {
+      if (const auto* ips = fill_store.lookup_entry(input_queue[chain_probe_cursor].ip.to<uint64_t>()); ips != nullptr && !ips->empty()) {
+        do_chain_trigger(*ips);
+      }
+      ++chain_probe_cursor;
+    }
   }
 }
 
@@ -229,8 +256,8 @@ bool O3_CPU::do_init_instruction(ooo_model_instr& arch_instr)
 
 long O3_CPU::check_dib()
 {
-  // ALT trace-fill: advance in-flight pre-decode walks (timed installs) once per cycle
-  if (fill_mode == fill_mode_type::ALT && !alt_walks.empty()) {
+  // ALT/HEAD/CHAIN trace-fill: advance in-flight pre-decode walks (timed installs) once per cycle
+  if ((fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD || fill_mode == fill_mode_type::CHAIN) && !alt_walks.empty()) {
     drain_alt_walks();
   }
   // scan through IFETCH_BUFFER to find instructions that hit in the decoded instruction buffer
@@ -278,7 +305,14 @@ void O3_CPU::drain_alt_walks()
             && w.lines_ready.count(champsim::block_number{champsim::address{w.windows[w.idx].front()}}.to<uint64_t>()) == 0) {
           break;
         }
-        sim_stats.alt_installed_windows += DIB.install(w.windows[w.idx], /*prefetch=*/true);
+        if (fill_mode == fill_mode_type::CHAIN && uop_buffer_windows > 0) {
+          // CHAIN: stage into the trace-uop buffer (no u-op-cache pollution);
+          // demand hits promote from there
+          uop_buffer_push(w.windows[w.idx], w.probe_time);
+          ++sim_stats.alt_installed_windows;
+        } else {
+          sim_stats.alt_installed_windows += DIB.install(w.windows[w.idx], /*prefetch=*/true);
+        }
         ++w.idx;
         w.last_progress = current_time;
       }
@@ -319,6 +353,128 @@ bool O3_CPU::alt_window_pending(uint64_t rawip) const
     }
   }
   return false;
+}
+
+// CHAIN metadata format encoder: group the trace's uops into aligned windows,
+// keep the first meta_windows window slots (truncating longer traces), and
+// verify every consecutive window delta fits a signed 16-bit field (±2^15
+// windows = ±1MB).  Returns the kept uops; encodable=false rejects the trace.
+std::vector<uint64_t> O3_CPU::chain_encode(const std::vector<uint64_t>& ips, bool& truncated, bool& encodable) const
+{
+  std::vector<uint64_t> kept;
+  kept.reserve(ips.size());
+  truncated = false;
+  encodable = true;
+  int windows_used = 0;
+  uint64_t last_tag = 0;
+  bool have_tag = false;
+  for (uint64_t raw : ips) {
+    const uint64_t tag = raw >> dib_window_bits;
+    if (!have_tag || tag != last_tag) { // a new window slot
+      if (windows_used == meta_windows) {
+        truncated = true;
+        break;
+      }
+      if (have_tag) {
+        const int64_t delta = static_cast<int64_t>(tag) - static_cast<int64_t>(last_tag);
+        if (delta < -32768 || delta > 32767) {
+          encodable = false; // far transfer: not representable in the 16-bit delta
+          return kept;
+        }
+      }
+      ++windows_used;
+      have_tag = true;
+      last_tag = tag;
+    }
+    kept.push_back(raw);
+  }
+  return kept;
+}
+
+// CHAIN walk launch: probe hit at IFETCH enqueue on a trace entry.  The manifest
+// is already format-enforced (<= meta_windows windows, deltas encodable), so the
+// walk covers the whole stored trace.  All line addresses are known immediately
+// (entry pc + deltas); in real-L1I mode the first lines issue THIS cycle.
+void O3_CPU::do_chain_trigger(const std::vector<uint64_t>& ips)
+{
+  const uint64_t entry = ips.front();
+  if (DIB.probe(champsim::address{entry})) {
+    return; // entry window already resident: nothing to prefetch
+  }
+  const uint64_t etag = entry >> dib_window_bits;
+  if (std::any_of(std::begin(uop_buffer), std::end(uop_buffer), [etag](const auto& e) { return e.tag == etag; })) {
+    return; // already staged
+  }
+  if (std::any_of(std::begin(alt_walks), std::end(alt_walks), [entry](const auto& w) { return w.entry == entry; })) {
+    return; // already being walked
+  }
+  if (alt_walks.size() >= alt_walk_max) {
+    ++sim_stats.alt_drops;
+    return;
+  }
+  alt_walk w;
+  w.entry = entry;
+  w.ready = current_time + alt_walk_delay_cycles * clock_period;
+  w.last_progress = current_time;
+  w.probe_time = current_time;
+  uint64_t last = 0;
+  bool have_last = false;
+  for (uint64_t raw : ips) {
+    const uint64_t tag = raw >> dib_window_bits;
+    if (have_last && tag == last) {
+      w.windows.back().push_back(raw);
+      continue;
+    }
+    have_last = true;
+    last = tag;
+    w.windows.push_back({raw});
+  }
+  if (alt_walk_l1i) {
+    uint64_t last_blk = 0;
+    bool have_blk = false;
+    for (const auto& win : w.windows) {
+      const uint64_t blk = champsim::block_number{champsim::address{win.front()}}.to<uint64_t>();
+      if (have_blk && blk == last_blk) {
+        continue;
+      }
+      have_blk = true;
+      last_blk = blk;
+      w.lines_pending.push_back(win.front());
+    }
+    // all line addresses are known from the manifest: issue up to two this cycle
+    for (int n = 0; n < 2 && !w.lines_pending.empty(); ++n) {
+      CacheBus::request_type line_pkt;
+      line_pkt.v_address = champsim::address{w.lines_pending.front()};
+      line_pkt.ip = champsim::address{w.lines_pending.front()};
+      line_pkt.instr_id = 0;
+      if (!L1I_bus.issue_read(line_pkt)) {
+        break;
+      }
+      w.lines_pending.pop_front();
+      ++sim_stats.alt_lines_issued;
+    }
+  }
+  alt_walks.push_back(std::move(w));
+  ++sim_stats.alt_triggers;
+}
+
+// CHAIN staging buffer: FIFO of pre-decoded windows awaiting demand.  A refresh
+// of a resident tag replaces it; capacity eviction discards the oldest window
+// (counted as overshoot if it was never demanded -- hits erase their entry).
+void O3_CPU::uop_buffer_push(const std::vector<uint64_t>& window_ips, champsim::chrono::clock::time_point probe_time)
+{
+  const uint64_t tag = window_ips.front() >> dib_window_bits;
+  if (auto it = std::find_if(std::begin(uop_buffer), std::end(uop_buffer), [tag](const auto& e) { return e.tag == tag; });
+      it != std::end(uop_buffer)) {
+    it->ips = window_ips; // refresh
+    it->probe_time = probe_time;
+    return;
+  }
+  while (uop_buffer.size() >= static_cast<std::size_t>(uop_buffer_windows)) {
+    uop_buffer.pop_front();
+    ++sim_stats.chain_buf_evict_unused; // anything still resident was never demanded
+  }
+  uop_buffer.push_back({tag, window_ips, probe_time});
 }
 
 // wait-eligible variant: the walk holding the window, or nullptr -- background
@@ -403,6 +559,86 @@ void O3_CPU::do_alt_trigger(uint64_t alt_pc)
   ++sim_stats.alt_triggers;
 }
 
+// HEAD trace-fill walk: pre-decode the trace's TAIL, from start_idx, following
+// the recorded path through at most tail_targets taken transfers (the manifest's
+// reach; a discontinuity in consecutive ips = a taken transfer, 4B instructions).
+// In real-L1I mode the first line is issued THIS cycle (same cycle as the head
+// hit) so the tail's fetch latency overlaps head consumption.
+void O3_CPU::do_head_trigger(const std::vector<uint64_t>& ips, std::size_t start_idx)
+{
+  if (start_idx >= ips.size()) {
+    return; // trace is all head, or start beyond the trace
+  }
+  const uint64_t entry = ips.front();
+  if (std::any_of(std::begin(alt_walks), std::end(alt_walks), [entry](const auto& w) { return w.entry == entry; })) {
+    return; // this trace's tail is already being walked
+  }
+  if (alt_walks.size() >= alt_walk_max) {
+    ++sim_stats.alt_drops;
+    return;
+  }
+  // manifest truncation: stop after tail_targets taken transfers past start_idx
+  std::size_t end_idx = ips.size();
+  if (tail_targets >= 0) {
+    int taken = 0;
+    for (std::size_t i = start_idx + 1; i < ips.size(); ++i) {
+      if (ips[i] != ips[i - 1] + 4) { // discontinuity = taken transfer
+        if (++taken > tail_targets) {
+          end_idx = i;
+          break;
+        }
+      }
+    }
+  }
+  alt_walk w;
+  w.entry = entry;
+  w.ready = current_time + alt_walk_delay_cycles * clock_period;
+  w.last_progress = current_time;
+  uint64_t last = 0;
+  bool have_last = false;
+  for (std::size_t i = start_idx; i < end_idx; ++i) {
+    const uint64_t raw = ips[i];
+    const uint64_t tag = raw >> dib_window_bits;
+    if (have_last && tag == last) {
+      w.windows.back().push_back(raw);
+      continue;
+    }
+    have_last = true;
+    last = tag;
+    w.windows.push_back({raw});
+  }
+  if (w.windows.empty()) {
+    return;
+  }
+  if (alt_walk_l1i) {
+    uint64_t last_blk = 0;
+    bool have_blk = false;
+    for (const auto& win : w.windows) {
+      const uint64_t rep = win.front();
+      const uint64_t blk = champsim::block_number{champsim::address{rep}}.to<uint64_t>();
+      if (have_blk && blk == last_blk) {
+        continue;
+      }
+      have_blk = true;
+      last_blk = blk;
+      w.lines_pending.push_back(rep);
+    }
+    // issue the first tail line in the SAME cycle as the head hit
+    if (!w.lines_pending.empty()) {
+      CacheBus::request_type line_pkt;
+      line_pkt.v_address = champsim::address{w.lines_pending.front()};
+      line_pkt.ip = champsim::address{w.lines_pending.front()};
+      line_pkt.instr_id = 0;
+      if (L1I_bus.issue_read(line_pkt)) {
+        w.lines_pending.pop_front();
+        ++sim_stats.alt_lines_issued;
+      }
+    }
+  }
+  alt_walks.push_back(std::move(w));
+  ++sim_stats.alt_triggers;
+}
+
 void O3_CPU::do_check_dib(ooo_model_instr& instr)
 {
   // Check the micro-op cache to see if we recently decoded this window
@@ -431,6 +667,71 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
           return; // dib_checked stays false -> retried next cycle (hit-under-fill)
         }
         holder->background = true; // bytes are far: stop waiting on this walk
+      }
+    }
+  }
+  // HEAD trace-fill: a trace is an instantly-servable HEAD (first head_uops uops,
+  // held as uops in the store) plus a fetch MANIFEST for the tail (the next
+  // tail_targets taken targets).  A miss that lands in a resident trace's head
+  // region is served directly to the backend (hit, no DIB install, no bytes),
+  // and the tail walk -- real L1I/L2 line fetches + pre-decode -- launches the
+  // SAME cycle so its latency hides behind head consumption.  A miss in the tail
+  // region launches the walk from that point and uses the ALT wait machinery.
+  if (fill_mode == fill_mode_type::HEAD && !hit && !warmup) {
+    const uint64_t rawip = instr.ip.to<uint64_t>();
+    if (const auto* ips = fill_store.lookup_window(rawip); ips != nullptr && !ips->empty()) {
+      const uint64_t wtag = rawip >> dib_window_bits;
+      std::size_t idx = ips->size(); // first trace position in the missed window
+      for (std::size_t i = 0; i < ips->size(); ++i) {
+        if (((*ips)[i] >> dib_window_bits) == wtag) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx < static_cast<std::size_t>(head_uops)) {
+        ++sim_stats.uop_trace_fill_hits; // head uops feed the backend directly
+        hit = true;
+        do_head_trigger(*ips, static_cast<std::size_t>(head_uops)); // tail walk, same cycle
+      } else if (idx < ips->size()) {
+        do_head_trigger(*ips, idx); // tail-region miss: walk from here
+      }
+    }
+    if (!hit && alt_walk_wait) {
+      if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr) {
+        if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
+          ++instr.dib_wait_cycles;
+          ++sim_stats.alt_wait_cycles;
+          return; // hit-under-fill: wait for the in-flight tail
+        }
+        holder->background = true;
+      }
+    }
+  }
+  // CHAIN trace-fill: on a u-op-cache miss, probe the trace-uop staging buffer
+  // (walk output).  A hit serves the uops directly and PROMOTES the window into
+  // the u-op cache as a demand-class fill; the slack histogram records how far
+  // ahead of demand the walk ran.  A miss whose window is in an in-flight walk
+  // uses the wait machinery.
+  if (fill_mode == fill_mode_type::CHAIN && !hit && !warmup) {
+    const uint64_t rawip = instr.ip.to<uint64_t>();
+    const uint64_t wtag = rawip >> dib_window_bits;
+    auto bit = std::find_if(std::begin(uop_buffer), std::end(uop_buffer), [wtag](const auto& e) { return e.tag == wtag; });
+    if (bit != std::end(uop_buffer)) {
+      ++sim_stats.chain_buf_hits;
+      hit = true;
+      const auto slack = (current_time - bit->probe_time) / clock_period;
+      const std::size_t bucket = (slack <= 4) ? 0 : (slack <= 8) ? 1 : (slack <= 16) ? 2 : (slack <= 32) ? 3 : (slack <= 64) ? 4 : 5;
+      ++sim_stats.chain_slack[bucket];
+      DIB.install(bit->ips, /*prefetch=*/false); // promote: demand-class fill at MRU
+      uop_buffer.erase(bit);
+    } else if (alt_walk_wait) {
+      if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr) {
+        if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
+          ++instr.dib_wait_cycles;
+          ++sim_stats.alt_wait_cycles;
+          return; // walk in flight: hit-under-fill
+        }
+        holder->background = true;
       }
     }
   }
@@ -465,7 +766,8 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     }
   }
   if (fill_mode != fill_mode_type::OFF && fill_mode != fill_mode_type::FLUSH && fill_mode != fill_mode_type::PERFECT
-      && fill_mode != fill_mode_type::PARALLEL && fill_mode != fill_mode_type::ALT) {
+      && fill_mode != fill_mode_type::PARALLEL && fill_mode != fill_mode_type::ALT && fill_mode != fill_mode_type::HEAD
+      && fill_mode != fill_mode_type::CHAIN) {
     const std::vector<uint64_t>* ips = nullptr;
     if (fill_mode == fill_mode_type::EVERY) {
       ips = fill_store.lookup_entry(instr.ip.to<uint64_t>()); // hit-or-miss at a trace entry
@@ -539,7 +841,23 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     if (fill_mode != fill_mode_type::OFF) {
       if (stall.get_traces().size() > before) {
         const auto& t = stall.get_traces().back();
-        fill_store.insert(t.entry, t.ips, t.cost);
+        if (fill_mode == fill_mode_type::CHAIN) {
+          // enforce the metadata format at insert: <= meta_windows window slots,
+          // every window delta encodable in 16 bits (else the trace is rejected)
+          bool truncated = false;
+          bool encodable = true;
+          auto enc = chain_encode(t.ips, truncated, encodable);
+          if (encodable) {
+            if (truncated) {
+              ++sim_stats.chain_truncated;
+            }
+            fill_store.insert(t.entry, enc, t.cost);
+          } else {
+            ++sim_stats.chain_unencodable;
+          }
+        } else {
+          fill_store.insert(t.entry, t.ips, t.cost);
+        }
       } else if (stall.touched()) {
         // re-capture of a stored stretch: refresh its accumulated cost so the
         // cost-aware eviction policy sees current values
@@ -728,6 +1046,7 @@ long O3_CPU::decode_instruction()
         this->fetch_resume_time = this->current_time + BRANCH_MISPREDICT_PENALTY;
         this->do_flush_fill(db_entry); // FLUSH mode: warm the recovery path
         this->in_recovery = true;      // frontend now refilling the recovery path
+        this->chain_probe_cursor = 0;  // CHAIN deep probe: FTQ flush -- lead rebuilds
       }
     }
     // Add to dispatch
@@ -1060,6 +1379,7 @@ void O3_CPU::do_complete_execution(ooo_model_instr& instr)
     fetch_resume_time = current_time + BRANCH_MISPREDICT_PENALTY;
     do_flush_fill(instr); // FLUSH mode: warm the recovery path
     in_recovery = true;   // frontend now refilling the recovery path
+    chain_probe_cursor = 0; // CHAIN deep probe: FTQ flush -- lead rebuilds
   }
 }
 
@@ -1087,7 +1407,8 @@ long O3_CPU::handle_memory_return()
 
     // real-L1I walk mode: any arriving line (walk-issued or demand, incl. MSHR merges)
     // marks that block ready in all in-flight walks
-    if (fill_mode == fill_mode_type::ALT && alt_walk_l1i && !alt_walks.empty()) {
+    if ((fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD || fill_mode == fill_mode_type::CHAIN) && alt_walk_l1i
+        && !alt_walks.empty()) {
       const uint64_t blk = champsim::block_number{l1i_entry.v_address}.to<uint64_t>();
       for (auto& w : alt_walks) {
         w.lines_ready.insert(blk);

@@ -44,6 +44,8 @@ RE_CST_AVGOCC = re.compile(r'trace-stall top-by-cost avg-occ: ' + _bktv, re.M)
 RE_CST_AVGLEN = re.compile(r'trace-stall top-by-cost avg-len: ' + _bktv, re.M)
 RE_ALT = re.compile(r'trace-alt: triggers (\d+) dropped (\d+) installed-windows (\d+) late-misses (\d+)(?: useful-hits (\d+))?(?: wait-cycles (\d+))?'
                     r'(?: lines-issued (\d+) line-stalls (\d+))?', re.M)
+RE_CHAIN = re.compile(r'trace-chain: unencodable (\d+) truncated (\d+) buffer-hits (\d+) buffer-evicted-unused (\d+) '
+                      r'slack\(4/8/16/32/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
 
 
 def parse_file(path):
@@ -129,6 +131,11 @@ def parse_file(path):
         d['alt_wait'] = int(al.group(6)) if al.group(6) else None
         d['alt_lines'] = int(al.group(7)) if al.group(7) else None
         d['alt_line_stalls'] = int(al.group(8)) if al.group(8) else None
+    ch = RE_CHAIN.search(txt)
+    if ch:
+        d['chain_unenc'], d['chain_trunc'] = int(ch.group(1)), int(ch.group(2))
+        d['chain_hits'], d['chain_evict'] = int(ch.group(3)), int(ch.group(4))
+        d['chain_slack'] = [int(ch.group(i)) for i in range(5, 11)]
     for key, rx in (('s_oo', RE_OCC_AVGOCC), ('s_ol', RE_OCC_AVGLEN), ('s_co', RE_COV_AVGOCC), ('s_cl', RE_COV_AVGLEN),
                     ('s_ko', RE_CST_AVGOCC), ('s_kl', RE_CST_AVGLEN)):
         mm2 = rx.search(txt)
@@ -267,6 +274,15 @@ def aggregate(path, pattern, include):
         if lns and amean(lns) > 0:
             lst = amean([r['alt_line_stalls'] for r in have_alt if r.get('alt_line_stalls') is not None])
             print(f"L1I lines issued:  {amean(lns):,.0f}   (walk line-stall cycles {lst:,.0f})")
+        have_chain = [r for r in have_alt if r.get('chain_hits') is not None and (r['chain_hits'] > 0 or r.get('chain_unenc', 0) > 0)]
+        if have_chain:
+            print(f"chain: buffer hits {amean([r['chain_hits'] for r in have_chain]):,.0f}   "
+                  f"evicted-unused {amean([r['chain_evict'] for r in have_chain]):,.0f}   "
+                  f"unencodable {amean([r['chain_unenc'] for r in have_chain]):,.0f}   truncated {amean([r['chain_trunc'] for r in have_chain]):,.0f}")
+            sl = [amean([r['chain_slack'][i] for r in have_chain]) for i in range(6)]
+            tot = sum(sl)
+            if tot > 0:
+                print("chain slack (probe->demand):  " + "  ".join(f"{lbl}={100*v/tot:.0f}%" for lbl, v in zip(['<=4', '<=8', '<=16', '<=32', '<=64', '>64'], sl)))
 
     have_fe = [r for r in rows if 'ti_total' in r]
     if not have_fe:

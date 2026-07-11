@@ -56,6 +56,11 @@ struct core_builder_base {
   int m_trace_walk_wait_cap{16};       // alt fill: max cycles an instruction waits on a pending window (0 = unbounded)
   int m_trace_stall_l1i_gate{0};       // stall segmenter: 1 = only commit stretches that also missed L1I
   int m_trace_store_cost_evict{0};     // trace store: 1 = evict minimum-stall-cost trace instead of LRU
+  int m_trace_head_uops{8};            // head fill: uops stored per trace head (served instantly)
+  int m_trace_tail_targets{3};         // head fill: taken targets in the tail manifest (<0 = unlimited)
+  int m_trace_uop_buffer{16};          // chain fill: trace-uop staging buffer capacity in windows (0 = install direct)
+  int m_trace_meta_windows{4};         // chain fill: manifest window slots per trace (entry + 16-bit deltas)
+  int m_trace_probe_ahead{0};          // chain fill: deep-probe lead in instructions ahead of enqueue (0 = enqueue only)
   std::size_t m_ifetch_buffer_size{1};
   std::size_t m_decode_buffer_size{1};
   std::size_t m_dispatch_buffer_size{1};
@@ -227,6 +232,40 @@ public:
    * (LRU tie-break) instead of plain LRU.  Default 0.
    */
   self_type& trace_store_cost_evict(int trace_store_cost_evict_);
+
+  /**
+   * HEAD fill mode: number of uops stored per trace head, served instantly to
+   * the backend on a head-region hit.  Default 8.
+   */
+  self_type& trace_head_uops(int trace_head_uops_);
+
+  /**
+   * HEAD fill mode: taken-branch targets in the tail manifest -- the tail walk
+   * may follow the recorded path through at most this many taken transfers
+   * (<0 = unlimited).  Default 3.
+   */
+  self_type& trace_tail_targets(int trace_tail_targets_);
+
+  /**
+   * CHAIN fill mode: trace-uop staging buffer capacity in windows (walk output
+   * lands here, not in the u-op cache; demand hits promote).  0 disables the
+   * buffer (walks install directly).  Default 16 (= 1KB of uops).
+   */
+  self_type& trace_uop_buffer(int trace_uop_buffer_);
+
+  /**
+   * CHAIN fill mode: manifest window slots per trace (entry window + 16-bit
+   * window deltas); traces spanning more windows are truncated.  Default 4.
+   */
+  self_type& trace_meta_windows(int trace_meta_windows_);
+
+  /**
+   * CHAIN fill mode: probe the instruction supply this many instructions AHEAD
+   * of the IFETCH transfer point (models the decoupled BP/FTQ lead over the
+   * fetch-point u-op-cache lookup; resets on misprediction).  0 = probe at
+   * enqueue only.  Default 0.
+   */
+  self_type& trace_probe_ahead(int trace_probe_ahead_);
 
   /**
    * Specify the maximum size of the instruction fetch buffer.
@@ -521,6 +560,41 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_store_cost_evict(int trace_store_cost_evict_) -> self_type&
 {
   m_trace_store_cost_evict = trace_store_cost_evict_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_head_uops(int trace_head_uops_) -> self_type&
+{
+  m_trace_head_uops = trace_head_uops_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_tail_targets(int trace_tail_targets_) -> self_type&
+{
+  m_trace_tail_targets = trace_tail_targets_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_uop_buffer(int trace_uop_buffer_) -> self_type&
+{
+  m_trace_uop_buffer = trace_uop_buffer_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_meta_windows(int trace_meta_windows_) -> self_type&
+{
+  m_trace_meta_windows = trace_meta_windows_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_probe_ahead(int trace_probe_ahead_) -> self_type&
+{
+  m_trace_probe_ahead = trace_probe_ahead_;
   return *this;
 }
 

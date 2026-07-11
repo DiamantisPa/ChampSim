@@ -62,6 +62,13 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.alt_lines_issued -= rhs.alt_lines_issued;
   lhs.alt_line_stalls -= rhs.alt_line_stalls;
   lhs.alt_walk_aborts -= rhs.alt_walk_aborts;
+  lhs.chain_unencodable -= rhs.chain_unencodable;
+  lhs.chain_truncated -= rhs.chain_truncated;
+  lhs.chain_buf_hits -= rhs.chain_buf_hits;
+  lhs.chain_buf_evict_unused -= rhs.chain_buf_evict_unused;
+  for (std::size_t i = 0; i < lhs.chain_slack.size(); ++i) {
+    lhs.chain_slack[i] -= rhs.chain_slack[i];
+  }
   lhs.fe_stall_steady -= rhs.fe_stall_steady;
   lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
   lhs.rob_idle_steady -= rhs.rob_idle_steady;

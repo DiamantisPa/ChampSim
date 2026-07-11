@@ -75,6 +75,12 @@ struct cpu_stats {
   uint64_t alt_lines_issued = 0;      // real-L1I mode: cache-line reads the walks issued through the L1I
   uint64_t alt_line_stalls = 0;       // real-L1I mode: walk-cycles stalled waiting for a line to arrive
   uint64_t alt_walk_aborts = 0;       // watchdog: walks aborted after making no progress (lost line response)
+  // CHAIN fill mode:
+  uint64_t chain_unencodable = 0;       // committed traces rejected: a window delta overflows 16 bits (>±1MB)
+  uint64_t chain_truncated = 0;         // committed traces cut to meta_windows window slots
+  uint64_t chain_buf_hits = 0;          // demand hits served from the trace-uop buffer (then promoted)
+  uint64_t chain_buf_evict_unused = 0;  // buffer windows evicted without ever being demanded (walk overshoot)
+  std::array<uint64_t, 6> chain_slack{}; // probe->first-demand-touch cycles: <=4, <=8, <=16, <=32, <=64, >64
   uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)
