@@ -16,6 +16,9 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.uop_miss_recovery -= rhs.uop_miss_recovery;
   lhs.uop_miss_steady_traced -= rhs.uop_miss_steady_traced;
   lhs.uop_miss_recovery_traced -= rhs.uop_miss_recovery_traced;
+  lhs.store_evictions -= rhs.store_evictions;
+  lhs.store_conflict_evictions -= rhs.store_conflict_evictions;
+  // store_occupancy is a level, not a counter: keep the end-of-phase value
   lhs.stall_traces -= rhs.stall_traces;
   lhs.stall_traces_candidates -= rhs.stall_traces_candidates;
   lhs.stall_dedup -= rhs.stall_dedup;
@@ -66,9 +69,20 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.chain_truncated -= rhs.chain_truncated;
   lhs.chain_buf_hits -= rhs.chain_buf_hits;
   lhs.chain_buf_evict_unused -= rhs.chain_buf_evict_unused;
+  lhs.chain_filtered_windows -= rhs.chain_filtered_windows;
   for (std::size_t i = 0; i < lhs.chain_slack.size(); ++i) {
     lhs.chain_slack[i] -= rhs.chain_slack[i];
   }
+  lhs.ucp_cond_seen -= rhs.ucp_cond_seen;
+  lhs.ucp_cond_misses -= rhs.ucp_cond_misses;
+  lhs.ucp_h2p_marked -= rhs.ucp_h2p_marked;
+  lhs.ucp_h2p_marked_misses -= rhs.ucp_h2p_marked_misses;
+  lhs.ucp_paths -= rhs.ucp_paths;
+  lhs.ucp_stop_sat -= rhs.ucp_stop_sat;
+  lhs.ucp_stop_ind -= rhs.ucp_stop_ind;
+  lhs.ucp_stop_btbmiss -= rhs.ucp_stop_btbmiss;
+  lhs.ucp_stop_maxip -= rhs.ucp_stop_maxip;
+  lhs.ucp_ind_walked -= rhs.ucp_ind_walked;
   lhs.fe_stall_steady -= rhs.fe_stall_steady;
   lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
   lhs.rob_idle_steady -= rhs.rob_idle_steady;

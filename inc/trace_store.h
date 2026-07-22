@@ -32,12 +32,42 @@ public:
   // the JSON knob: precedence env > JSON > default, like the other knobs).
   void set_capacity(std::size_t cap) { capacity = (cap < 1) ? 1 : cap; }
 
+  // organization: ways == 0 -> fully-associative pool (capacity = sets if
+  // sets > 0, else whatever set_capacity gave); ways > 0 -> sets x ways
+  // set-associative, indexed by entry-PC word address, victim chosen within
+  // the entry's set only.  Must be called before any insert.
+  void set_geometry(std::size_t sets_, unsigned ways_)
+  {
+    num_ways = ways_;
+    if (num_ways == 0) {
+      if (sets_ > 0) {
+        capacity = sets_;
+      }
+      return;
+    }
+    num_sets = (sets_ < 1) ? 1 : sets_;
+    capacity = num_sets * num_ways;
+    entries.assign(capacity, {});
+    entry_index.clear();
+    window_index.clear();
+    live = 0;
+  }
+
   // replacement policy: false = LRU (default), true = evict the minimum
   // stall-cost trace (LRU tie-break) -- keep what hurts most, not what's recent.
   void set_cost_policy(bool cost_evict_) { cost_evict = cost_evict_; }
 
   [[nodiscard]] std::size_t cap() const { return capacity; }
-  [[nodiscard]] std::size_t size() const { return entries.size(); }
+  [[nodiscard]] std::size_t size() const { return (num_ways > 0) ? live : entries.size(); }
+  [[nodiscard]] std::size_t sets() const { return (num_ways > 0) ? num_sets : 0; }
+  [[nodiscard]] unsigned ways() const { return num_ways; }
+  [[nodiscard]] bool cost_policy() const { return cost_evict; }
+  [[nodiscard]] uint64_t evictions() const { return n_evict; }
+  [[nodiscard]] uint64_t conflict_evictions() const { return n_conflict_evict; }
+  [[nodiscard]] bool hash_mode() const { return xor_hash; }
+
+  // set-index hash: false = plain modulo (legacy first-cut), true = xor-fold
+  void set_hash(bool xor_hash_) { xor_hash = xor_hash_; }
 
   void insert(uint64_t entry, const std::vector<uint64_t>& ips, uint64_t cost = 0)
   {
@@ -56,16 +86,42 @@ public:
     }
 
     std::size_t slot = 0;
-    if (entries.size() < capacity) {
+    if (num_ways > 0) { // set-associative: free way in the entry's set, else per-set victim
+      const std::size_t base = set_of(entry) * num_ways;
+      slot = base;
+      bool found_free = false;
+      for (std::size_t i = base; i < base + num_ways; ++i) {
+        if (!entries[i].valid) {
+          slot = i;
+          found_free = true;
+          break;
+        }
+      }
+      if (!found_free) {
+        slot = victim(base, base + num_ways);
+        ++n_evict;
+        if (live < capacity) {
+          ++n_conflict_evict; // evicted from a full set while the store had free slots elsewhere = set skew
+        }
+        entry_index.erase(entries[slot].entry);
+        if (window_indexed) {
+          remove_windows(slot);
+        }
+      } else {
+        ++live;
+      }
+      entries[slot] = {entry, ips, ++tick, cost, {}, true};
+    } else if (entries.size() < capacity) {
       slot = entries.size();
-      entries.push_back({entry, ips, ++tick, cost, {}});
+      entries.push_back({entry, ips, ++tick, cost, {}, true});
     } else { // evict per policy (LRU or min-cost)
-      slot = victim();
+      slot = victim(0, entries.size());
+      ++n_evict;
       entry_index.erase(entries[slot].entry);
       if (window_indexed) {
         remove_windows(slot);
       }
-      entries[slot] = {entry, ips, ++tick, cost, {}};
+      entries[slot] = {entry, ips, ++tick, cost, {}, true};
     }
     entry_index.emplace(entry, slot);
     if (window_indexed) {
@@ -113,6 +169,7 @@ private:
     uint64_t lru = 0;
     uint64_t cost = 0;             // accumulated ROB-stall cycles of the trace (cost-aware eviction)
     std::vector<uint64_t> windows; // distinct window keys (only if window_indexed)
+    bool valid = false;            // slot occupancy (pre-sized set-associative array)
   };
 
   static std::size_t env_capacity()
@@ -125,10 +182,10 @@ private:
     return DEFAULT_CAPACITY;
   }
 
-  std::size_t victim() const
+  std::size_t victim(std::size_t begin, std::size_t end) const
   {
-    std::size_t v = 0;
-    for (std::size_t i = 1; i < entries.size(); ++i) {
+    std::size_t v = begin;
+    for (std::size_t i = begin + 1; i < end; ++i) {
       if (cost_evict) {
         if (entries[i].cost < entries[v].cost || (entries[i].cost == entries[v].cost && entries[i].lru < entries[v].lru)) {
           v = i;
@@ -138,6 +195,19 @@ private:
       }
     }
     return v;
+  }
+
+  // set index: entry PCs are word-aligned, so index on the word address.
+  // xor_hash folds higher PC bits into the index (hot code clusters entry PCs
+  // so low bits alone skew badly: measured 100% of set-assoc evictions occur
+  // while the store is globally underfull under the plain modulo index).
+  [[nodiscard]] std::size_t set_of(uint64_t entry) const
+  {
+    const uint64_t h = entry >> 2;
+    if (xor_hash) {
+      return static_cast<std::size_t>((h ^ (h >> 10) ^ (h >> 20)) % num_sets);
+    }
+    return static_cast<std::size_t>(h % num_sets);
   }
 
   void add_windows(std::size_t slot)
@@ -169,10 +239,16 @@ private:
   }
 
   std::size_t capacity;
+  std::size_t num_sets = 1;  // only meaningful when num_ways > 0
+  unsigned num_ways = 0;     // 0 = fully associative (global victim scan)
+  std::size_t live = 0;      // valid-entry count in set-associative mode
   unsigned window_bits = 0;
   bool window_indexed = false;
   bool cost_evict = false;
+  bool xor_hash = false;
   uint64_t tick = 0;
+  uint64_t n_evict = 0;          // total evictions (any mode)
+  uint64_t n_conflict_evict = 0; // set-assoc evictions while the store was globally underfull (set skew)
   std::vector<ent> entries;
   std::unordered_map<uint64_t, std::size_t> entry_index;
   std::unordered_map<uint64_t, std::size_t> window_index;

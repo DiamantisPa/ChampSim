@@ -25,6 +25,7 @@
 #include <array>
 #include <bitset>
 #include <cstdlib>
+#include <iostream>
 #include <deque>
 #include <set>
 #include <limits>
@@ -181,6 +182,7 @@ public:
     champsim::chrono::clock::time_point last_progress{}; // watchdog: last install/issue (walk aborted if stuck)
     champsim::chrono::clock::time_point probe_time{};    // CHAIN: trigger time (slack = first demand touch - this)
     bool background = false; // wait-cap expired on this walk: demand no longer waits on it (pure background prefetch)
+    bool ucp = false;        // UCP alt-path walk: installs into the u-op cache as prefetch-class (never the chain buffer)
   };
   std::deque<alt_walk> alt_walks;
   std::size_t alt_walk_max = 2;
@@ -220,6 +222,44 @@ public:
   // 0 = probe at enqueue only (no lead).
   int chain_probe_ahead = 0;
   std::size_t chain_probe_cursor = 0; // next unprobed input_queue position (relative to front)
+  // per-window residency filter: at walk launch, probe each of the trace's
+  // windows in the u-op cache and the staging buffer, and fetch/stage ONLY the
+  // absent ones -- kills redundant staging (walks shorten, slots free up).
+  bool alt_walk_filter = false;
+
+  // UCP port (Singh et al., ISCA'24 "Alternate Path u-op Cache Prefetching"):
+  // on a hard-to-predict conditional (TAGE-SC-L confidence, classification
+  // published via ucp_hooks.h), walk the NOT-predicted path -- targets from the
+  // real BTB, directions from a dedicated 8KB Alt-BP (ucp_alt_tage.h), returns
+  // from a snapshot Alt-RAS -- and prefetch its windows into the u-op cache as
+  // prefetch-class fills through the existing alt-walk machinery (bytes through
+  // the real L1I when trace_walk_l1i is set).  Independent of trace_fill; off by
+  // default; the paper's no-Alt-Ind flavor (walks stop at indirect branches).
+  bool ucp_enable = false;
+  int ucp_threshold = 500;   // Table-I weighted stop counter limit (paper H2P_T)
+  int ucp_max_ip_check = 64; // stop after this many straight-line steps without a branch (paper MAX_IP_CHECK)
+  int ucp_step = 4;          // instruction stride on the alt path (ARM traces: 4B)
+  class TAGE_PREDICTOR_8KB* ucp_altbp = nullptr; // dedicated Alt-BP, allocated on first branch
+  bool ucp_altind_enable = false;      // 12.95KB flavor: 4KB Alt-ITTAGE walks through indirect branches
+  // global walk line-issue port model: at most this many walk line reads may enter
+  // the L1I per cycle, ACROSS all walks and trigger-time bursts (UCP's paper budgets
+  // 1 prefetch/cycle).  0 = legacy schema (per-walk 1/cycle, unlimited aggregate).
+  int alt_walk_issue_cap = 0;
+  int walk_issue_count = 0;                              // issues consumed this cycle
+  champsim::chrono::clock::time_point walk_issue_stamp{}; // cycle the count belongs to
+  // walk pre-decode model: at most trace_walk_decode_cap windows may install per
+  // cycle ACROSS all walks (the width of the decode resource serving the walks;
+  // 1 window = 8 uops ~= a 6-8 wide decoder).  0 = legacy per-walk schema.
+  // trace_walk_decode_shared additionally requires the DEMAND path to be in
+  // stream mode (u-op-cache hits, regular decoders idle) for walks to install at
+  // all -- UCP's "SharedDecoders" winner-takes-all rule: no dedicated hardware,
+  // walks borrow the existing decoders in their idle cycles only.
+  int alt_walk_decode_cap = 0;
+  bool alt_walk_decode_shared = false;
+  int walk_decode_count = 0;                               // installs consumed this cycle
+  champsim::chrono::clock::time_point walk_decode_stamp{}; // cycle the count belongs to
+  class alt_ittage* ucp_altind = nullptr; // dedicated Alt-Ind, allocated on first branch
+
   static constexpr int ALT_WALK_ABORT_CYCLES = 4096; // watchdog: abort a walk with no progress for this long
   static constexpr int STALL_L1I_MISS_CYCLES = 8;    // fetch completion slower than this => it missed L1I (hit ~4-6 cyc end-to-end)
   unsigned dib_window_bits = 0;
@@ -325,6 +365,13 @@ public:
   [[nodiscard]] std::vector<uint64_t> chain_encode(const std::vector<uint64_t>& ips, bool& truncated, bool& encodable) const;
   [[nodiscard]] bool alt_window_pending(uint64_t rawip) const;
   [[nodiscard]] alt_walk* alt_pending_walk(uint64_t rawip); // like alt_window_pending, but skips background walks
+  [[nodiscard]] bool walk_issue_available(); // under the issue cap this cycle?
+  void walk_issue_note();                    // consume one issue slot (on successful issue)
+  [[nodiscard]] bool walk_decode_available(); // may a walk install a window this cycle?
+  void walk_decode_note();                    // consume one install slot
+  void do_ucp_branch(const ooo_model_instr& arch_instr, uint64_t btb_target, bool always_taken, bool h2p);
+  [[nodiscard]] std::vector<uint64_t> ucp_generate_alt_path(const ooo_model_instr& h2p_instr, uint64_t start);
+  void do_ucp_trigger(uint64_t h2p_ip, const std::vector<uint64_t>& ips);
   long fetch_instruction();
   long promote_to_decode();
   long decode_instruction();
@@ -471,6 +518,25 @@ public:
         store_cap = std::atoi(e);
       }
       fill_store.set_capacity(static_cast<std::size_t>(store_cap < 1 ? 1 : store_cap));
+      int store_sets = b.m_trace_store_sets;
+      if (const char* e = std::getenv("PROMETHEUS_STORE_SETS"); e != nullptr && *e != '\0') {
+        store_sets = std::atoi(e);
+      }
+      int store_ways = b.m_trace_store_ways;
+      if (const char* e = std::getenv("PROMETHEUS_STORE_WAYS"); e != nullptr && *e != '\0') {
+        store_ways = std::atoi(e); // 0 = fully associative (legacy); N = N-way set-associative
+      }
+      // fully-assoc mode: a legacy PROMETHEUS_TRACE_STORE capacity sweep keeps
+      // authority over a JSON-baked sets value (env sets still wins if given)
+      if (store_ways == 0 && std::getenv("PROMETHEUS_STORE_SETS") == nullptr && std::getenv("PROMETHEUS_TRACE_STORE") != nullptr) {
+        store_sets = 0;
+      }
+      fill_store.set_geometry(static_cast<std::size_t>(store_sets < 0 ? 0 : store_sets), static_cast<unsigned>(store_ways < 0 ? 0 : store_ways));
+      int store_hash = b.m_trace_store_hash;
+      if (const char* e = std::getenv("PROMETHEUS_STORE_HASH"); e != nullptr && *e != '\0') {
+        store_hash = std::atoi(e); // 0 = plain modulo index, 1 = xor-fold
+      }
+      fill_store.set_hash(store_hash != 0);
       alt_walk_delay_cycles = b.m_trace_walk_delay;
       if (const char* e = std::getenv("PROMETHEUS_WALK_DELAY"); e != nullptr && *e != '\0') {
         alt_walk_delay_cycles = std::atoi(e); // base install delay in cycles (~L1I + decode)
@@ -520,7 +586,78 @@ public:
       if (const char* e = std::getenv("PROMETHEUS_PROBE_AHEAD"); e != nullptr && *e != '\0') {
         chain_probe_ahead = std::max(0, std::atoi(e)); // deep-probe lead in instructions (0 = enqueue only)
       }
+      alt_walk_filter = (b.m_trace_walk_filter != 0);
+      if (const char* e = std::getenv("PROMETHEUS_WALK_FILTER"); e != nullptr && *e != '\0') {
+        alt_walk_filter = (std::atoi(e) != 0); // per-window residency filter at walk launch
+      }
     }
+
+    // UCP port knobs: independent of the trace-fill mode (trace_ucp composes with
+    // any fill mode, including off = pure UCP)
+    ucp_enable = (b.m_trace_ucp != 0);
+    if (const char* e = std::getenv("PROMETHEUS_UCP"); e != nullptr && *e != '\0') {
+      ucp_enable = (std::atoi(e) != 0); // UCP alternate-path u-op prefetching
+    }
+    ucp_threshold = (b.m_trace_ucp_threshold < 1) ? 500 : b.m_trace_ucp_threshold;
+    if (const char* e = std::getenv("PROMETHEUS_UCP_T"); e != nullptr && *e != '\0') {
+      ucp_threshold = std::max(1, std::atoi(e)); // weighted stop-counter threshold
+    }
+    ucp_max_ip_check = (b.m_trace_ucp_max_ip < 1) ? 64 : b.m_trace_ucp_max_ip;
+    if (const char* e = std::getenv("PROMETHEUS_UCP_MAX_IP"); e != nullptr && *e != '\0') {
+      ucp_max_ip_check = std::max(1, std::atoi(e)); // straight-line run limit
+    }
+    ucp_step = (b.m_trace_ucp_step < 1) ? 4 : b.m_trace_ucp_step;
+    if (const char* e = std::getenv("PROMETHEUS_UCP_STEP"); e != nullptr && *e != '\0') {
+      ucp_step = std::max(1, std::atoi(e)); // alt-path instruction stride (bytes)
+    }
+    ucp_altind_enable = (b.m_trace_ucp_altind != 0);
+    if (const char* e = std::getenv("PROMETHEUS_UCP_ALTIND"); e != nullptr && *e != '\0') {
+      ucp_altind_enable = (std::atoi(e) != 0); // 4KB Alt-ITTAGE (12.95KB flavor)
+    }
+    alt_walk_issue_cap = (b.m_trace_walk_issue_cap < 0) ? 0 : b.m_trace_walk_issue_cap;
+    if (const char* e = std::getenv("PROMETHEUS_WALK_ISSUE_CAP"); e != nullptr && *e != '\0') {
+      alt_walk_issue_cap = std::max(0, std::atoi(e)); // global walk line-issues per cycle (0 = unlimited)
+    }
+    alt_walk_decode_cap = (b.m_trace_walk_decode_cap < 0) ? 0 : b.m_trace_walk_decode_cap;
+    if (const char* e = std::getenv("PROMETHEUS_WALK_DECODE_CAP"); e != nullptr && *e != '\0') {
+      alt_walk_decode_cap = std::max(0, std::atoi(e)); // global walk window-installs per cycle (0 = unlimited)
+    }
+    alt_walk_decode_shared = (b.m_trace_walk_decode_shared != 0);
+    if (const char* e = std::getenv("PROMETHEUS_WALK_DECODE_SHARED"); e != nullptr && *e != '\0') {
+      alt_walk_decode_shared = (std::atoi(e) != 0); // walks may install only in stream-mode cycles (shared decoders)
+    }
+    if (ucp_enable && fill_mode == fill_mode_type::OFF) {
+      // pure-UCP runs still need the walk pacing knobs (normally resolved with the fill block)
+      alt_walk_max = (b.m_trace_walk_max < 1) ? 1 : static_cast<std::size_t>(b.m_trace_walk_max);
+      if (const char* e = std::getenv("PROMETHEUS_WALK_MAX"); e != nullptr && *e != '\0') {
+        alt_walk_max = static_cast<std::size_t>(std::max(1, std::atoi(e)));
+      }
+      alt_walk_width = (b.m_trace_walk_width < 1) ? 1 : b.m_trace_walk_width;
+      if (const char* e = std::getenv("PROMETHEUS_WALK_WIDTH"); e != nullptr && *e != '\0') {
+        alt_walk_width = std::max(1, std::atoi(e));
+      }
+      alt_walk_delay_cycles = (b.m_trace_walk_delay < 0) ? 0 : b.m_trace_walk_delay;
+      if (const char* e = std::getenv("PROMETHEUS_WALK_DELAY"); e != nullptr && *e != '\0') {
+        alt_walk_delay_cycles = std::max(0, std::atoi(e));
+      }
+      alt_walk_l1i = (b.m_trace_walk_l1i != 0);
+      if (const char* e = std::getenv("PROMETHEUS_WALK_L1I"); e != nullptr && *e != '\0') {
+        alt_walk_l1i = (std::atoi(e) != 0);
+      }
+    }
+
+    // self-report the RESOLVED knob values (env > JSON > default) so every log
+    // records the exact configuration that produced it (stale-binary insurance)
+    std::cout << "Prometheus knobs: fill=" << b.m_trace_fill << " min_occ=" << stall.min_occ() << " rob=" << stall_rob_threshold
+              << " depth=" << stall.max_trace_uops() << " l1i_gate=" << stall.l1i_gated() << " meta_windows=" << meta_windows
+              << " store=" << fill_store.cap() << " sets=" << fill_store.sets() << " ways=" << fill_store.ways() << " hash=" << fill_store.hash_mode()
+              << " cost_evict=" << fill_store.cost_policy() << " walk_max=" << alt_walk_max << " walk_width=" << alt_walk_width
+              << " walk_delay=" << alt_walk_delay_cycles << " walk_l1i=" << alt_walk_l1i << " walk_wait=" << alt_walk_wait
+              << " wait_cap=" << alt_walk_wait_cap << " issue_cap=" << alt_walk_issue_cap << " decode_cap=" << alt_walk_decode_cap
+              << " decode_shared=" << alt_walk_decode_shared << " walk_filter=" << alt_walk_filter << " uop_buffer=" << uop_buffer_windows
+              << " probe_ahead=" << chain_probe_ahead << " head_uops=" << head_uops << " tail_targets=" << tail_targets
+              << " ucp=" << ucp_enable << " ucp_T=" << ucp_threshold << " ucp_max_ip=" << ucp_max_ip_check << " ucp_step=" << ucp_step
+              << " ucp_altind=" << ucp_altind_enable << std::endl;
   }
 };
 

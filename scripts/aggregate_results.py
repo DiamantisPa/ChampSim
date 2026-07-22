@@ -44,8 +44,22 @@ RE_CST_AVGOCC = re.compile(r'trace-stall top-by-cost avg-occ: ' + _bktv, re.M)
 RE_CST_AVGLEN = re.compile(r'trace-stall top-by-cost avg-len: ' + _bktv, re.M)
 RE_ALT = re.compile(r'trace-alt: triggers (\d+) dropped (\d+) installed-windows (\d+) late-misses (\d+)(?: useful-hits (\d+))?(?: wait-cycles (\d+))?'
                     r'(?: lines-issued (\d+) line-stalls (\d+))?', re.M)
-RE_CHAIN = re.compile(r'trace-chain: unencodable (\d+) truncated (\d+) buffer-hits (\d+) buffer-evicted-unused (\d+) '
-                      r'slack\(4/8/16/32/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
+RE_CHAIN = re.compile(r'trace-chain: unencodable (\d+) truncated (\d+) buffer-hits (\d+) buffer-evicted-unused (\d+)'
+                      r'(?: filtered (\d+))? slack\(4/8/16/32/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
+
+RE_UCPPORT = re.compile(r'trace-ucp: cond (\d+) cond-misses (\d+) h2p-marked (\d+) h2p-marked-misses (\d+) paths (\d+) '
+                        r'stops\(sat/ind/btbmiss/maxip\): (\d+) (\d+) (\d+) (\d+)(?: ind-walked (\d+))?', re.M)
+
+# UCP_ISCA24 artifact output format (their profiler printer; ROI IPC line is standard)
+RE_UCP_HIT = re.compile(r'^UOP_CACHE_HIT:\s+([\d.]+)', re.M)
+RE_UCP_SWITCH = re.compile(r'^SWITCH_STALLS_MPKI:\s+([\d.]+)', re.M)
+RE_UCP_L1I = re.compile(r'^L1I Hit Rate:\s+([\d.]+)', re.M)
+RE_UCP_PREF = re.compile(r'^total_window_pref:\s+(\d+)', re.M)
+RE_UCP_PREF_HITS = re.compile(r'^hits_from_pref:\s+(\d+)', re.M)
+RE_UCP_H2P_COV = re.compile(r'^h2p_coverage:\s+([\d.]+)', re.M)
+RE_UCP_H2P_ACC = re.compile(r'^h2p_accuracy:\s+([\d.]+)', re.M)
+# standard ChampSim L1I prefetch-traffic line (both printers emit it)
+RE_L1I_PREF = re.compile(r'L1I PREFETCH\s+REQUESTED:\s+(\d+)\s+ISSUED:\s+(\d+)\s+USEFUL:\s+(\d+)\s+USELESS:\s+(\d+)', re.M)
 
 
 def parse_file(path):
@@ -61,6 +75,27 @@ def parse_file(path):
     d['hit'] = float(h.group(1)) if h else None
     s = RE_SWITCH.search(txt)
     d['switch_mpki'] = float(s.group(1)) if s else None
+
+    # fall back to the UCP_ISCA24 artifact's output format
+    if d['hit'] is None:
+        h = RE_UCP_HIT.search(txt)
+        if h:
+            d['hit'] = float(h.group(1))
+            d['is_ucp'] = True
+    if d['switch_mpki'] is None:
+        s = RE_UCP_SWITCH.search(txt)
+        if s:
+            d['switch_mpki'] = float(s.group(1))
+    if d.get('is_ucp'):
+        for key, rx, cast in (('ucp_l1i_hit', RE_UCP_L1I, float), ('ucp_pref', RE_UCP_PREF, int),
+                              ('ucp_pref_hits', RE_UCP_PREF_HITS, int),
+                              ('ucp_h2p_cov', RE_UCP_H2P_COV, float), ('ucp_h2p_acc', RE_UCP_H2P_ACC, float)):
+            mu = rx.search(txt)
+            if mu:
+                d[key] = cast(mu.group(1))
+    lp = RE_L1I_PREF.search(txt)
+    if lp:
+        d['l1i_pref_issued'], d['l1i_pref_useful'] = int(lp.group(2)), int(lp.group(3))
 
     mm = RE_MISS.search(txt)
     if mm:
@@ -135,7 +170,13 @@ def parse_file(path):
     if ch:
         d['chain_unenc'], d['chain_trunc'] = int(ch.group(1)), int(ch.group(2))
         d['chain_hits'], d['chain_evict'] = int(ch.group(3)), int(ch.group(4))
-        d['chain_slack'] = [int(ch.group(i)) for i in range(5, 11)]
+        d['chain_filtered'] = int(ch.group(5)) if ch.group(5) else None
+        d['chain_slack'] = [int(ch.group(i)) for i in range(6, 12)]
+    up2 = RE_UCPPORT.search(txt)
+    if up2:
+        (d['ucpp_cond'], d['ucpp_cond_miss'], d['ucpp_marked'], d['ucpp_marked_miss'], d['ucpp_paths'],
+         d['ucpp_stop_sat'], d['ucpp_stop_ind'], d['ucpp_stop_btbmiss'], d['ucpp_stop_maxip']) = (int(up2.group(i)) for i in range(1, 10))
+        d['ucpp_ind_walked'] = int(up2.group(10)) if up2.group(10) else 0
     for key, rx in (('s_oo', RE_OCC_AVGOCC), ('s_ol', RE_OCC_AVGLEN), ('s_co', RE_COV_AVGOCC), ('s_cl', RE_COV_AVGLEN),
                     ('s_ko', RE_CST_AVGOCC), ('s_kl', RE_CST_AVGLEN)):
         mm2 = rx.search(txt)
@@ -158,7 +199,7 @@ def pct(num, den):
     return 100.0 * num / den if den else float('nan')
 
 
-def aggregate(path, pattern, include):
+def load_rows(path, pattern, include):
     files = sorted(glob.glob(os.path.join(path, pattern)))
     rows, skipped = [], 0
     for fp in files:
@@ -171,6 +212,11 @@ def aggregate(path, pattern, include):
             continue
         d['name'] = name
         rows.append(d)
+    return rows, skipped
+
+
+def aggregate(path, pattern, include, baseline=None, scatter=False):
+    rows, skipped = load_rows(path, pattern, include)
 
     print(f"\n=== {path} ===")
     print(f"simpoints: {len(rows)}  (skipped {skipped} with no ROI IPC)")
@@ -180,6 +226,62 @@ def aggregate(path, pattern, include):
     print(f"IPC:          arith-mean {amean([r['ipc'] for r in rows]):.4f}   geomean {gmean([r['ipc'] for r in rows]):.4f}")
     print(f"hit rate:     {amean([r['hit'] for r in rows]):.2f}%")
     print(f"switch MPKI:  {amean([r['switch_mpki'] for r in rows]):.3f}")
+
+    # per-workload speedup vs a baseline directory (matched by simpoint name)
+    if baseline:
+        pairs = [(r['name'], r['ipc'], baseline[r['name']]) for r in rows if baseline.get(r['name'], 0) > 0]
+        missing = len(rows) - len(pairs)
+        if pairs:
+            g = gmean([ipc / b for _, ipc, b in pairs])
+            note = f", {missing} unmatched" if missing else ""
+            print(f"vs baseline:  geomean speedup {100 * (g - 1):+.3f}%   ({len(pairs)} workloads{note})")
+            if scatter:
+                print("per-workload speedup (sorted):")
+                for name, ipc, b in sorted(pairs, key=lambda p: p[1] / p[2], reverse=True):
+                    print(f"  {name:<40s} {100 * (ipc / b - 1):+7.2f}%   ipc {ipc:.4f}  base {b:.4f}")
+
+    # UCP artifact runs: their prefetch/H2P counters (parsed from their output format)
+    have_ucp = [r for r in rows if r.get('is_ucp')]
+    if have_ucp:
+        print("\n--- UCP artifact stats ---")
+        l1i = [r['ucp_l1i_hit'] for r in have_ucp if 'ucp_l1i_hit' in r]
+        if l1i:
+            print(f"L1I hit rate:      {amean(l1i):.2f}%")
+        pref = [r['ucp_pref'] for r in have_ucp if 'ucp_pref' in r]
+        if pref and amean(pref) > 0:
+            hits = [r.get('ucp_pref_hits') for r in have_ucp if r.get('ucp_pref_hits') is not None]
+            line = f"window prefetches: {amean(pref):,.0f}"
+            if hits:
+                acc = amean([pct(r['ucp_pref_hits'], r['ucp_pref']) for r in have_ucp
+                             if r.get('ucp_pref_hits') is not None and r.get('ucp_pref')])
+                line += f"   muop hits from prefetched entries: {amean(hits):,.0f} ({acc:.1f}% of prefetched)"
+            print(line)
+        cov = [r['ucp_h2p_cov'] for r in have_ucp if 'ucp_h2p_cov' in r]
+        acc = [r['ucp_h2p_acc'] for r in have_ucp if 'ucp_h2p_acc' in r]
+        if cov or acc:
+            print(f"H2P detector:      coverage {amean(cov):.1f}%   accuracy {amean(acc):.1f}%")
+
+    # UCP port runs (our reimplementation): H2P detector quality + walk stop reasons
+    have_up = [r for r in rows if r.get('ucpp_cond', 0) > 0]
+    if have_up:
+        print("\n--- UCP port (our framework) ---")
+        cov = amean([pct(r['ucpp_marked_miss'], r['ucpp_cond_miss']) for r in have_up if r['ucpp_cond_miss']])
+        acc = amean([pct(r['ucpp_marked_miss'], r['ucpp_marked']) for r in have_up if r['ucpp_marked']])
+        mrate = amean([pct(r['ucpp_marked'], r['ucpp_cond']) for r in have_up if r['ucpp_cond']])
+        print(f"H2P detector:      coverage {cov:.1f}%   accuracy {acc:.1f}%   (marked {mrate:.1f}% of conditionals)")
+        paths = amean([r['ucpp_paths'] for r in have_up])
+        stops = [amean([r[k] for r in have_up]) for k in ('ucpp_stop_sat', 'ucpp_stop_ind', 'ucpp_stop_btbmiss', 'ucpp_stop_maxip')]
+        print(f"alt paths:         {paths:,.0f}   stops: sat {stops[0]:,.0f}  indirect {stops[1]:,.0f}  btb-miss {stops[2]:,.0f}  max-ip {stops[3]:,.0f}")
+        iw = amean([r.get('ucpp_ind_walked', 0) for r in have_up])
+        if iw > 0:
+            print(f"Alt-Ind:           {iw:,.0f} indirects walked through on a predicted target")
+
+    # L1I prefetch traffic (any run that issued prefetches: UCP alt path, L1I prefetchers)
+    have_lp = [r for r in rows if r.get('l1i_pref_issued', 0) > 0]
+    if have_lp:
+        iss = amean([r['l1i_pref_issued'] for r in have_lp])
+        acc = amean([pct(r['l1i_pref_useful'], r['l1i_pref_issued']) for r in have_lp if r['l1i_pref_issued']])
+        print(f"L1I prefetches:    issued {iss:,.0f}   useful {amean([r['l1i_pref_useful'] for r in have_lp]):,.0f} ({acc:.1f}%)   [{len(have_lp)}/{len(rows)} workloads]")
 
     # trace capture (stager): how many distinct traces segmentation built + coverage
     # (only shown when the stager actually ran, i.e. it observed u-ops)
@@ -279,6 +381,9 @@ def aggregate(path, pattern, include):
             print(f"chain: buffer hits {amean([r['chain_hits'] for r in have_chain]):,.0f}   "
                   f"evicted-unused {amean([r['chain_evict'] for r in have_chain]):,.0f}   "
                   f"unencodable {amean([r['chain_unenc'] for r in have_chain]):,.0f}   truncated {amean([r['chain_trunc'] for r in have_chain]):,.0f}")
+            filt = [r['chain_filtered'] for r in have_chain if r.get('chain_filtered') is not None]
+            if filt and amean(filt) > 0:
+                print(f"chain filtered:    {amean(filt):,.0f} windows already resident (not staged)")
             sl = [amean([r['chain_slack'][i] for r in have_chain]) for i in range(6)]
             tot = sum(sl)
             if tot > 0:
@@ -325,6 +430,8 @@ def main():
     ap.add_argument('dirs', nargs='+', help='directory(ies) containing <simpoint>.out files')
     ap.add_argument('--pattern', default='*.out', help="glob for result files (default '*.out')")
     ap.add_argument('--include', help='file with one simpoint name per line; restrict to these')
+    ap.add_argument('--baseline', help='baseline result directory; adds per-dir geomean speedup vs it')
+    ap.add_argument('--scatter', action='store_true', help='with --baseline: print per-workload speedups')
     args = ap.parse_args()
 
     include = None
@@ -333,8 +440,14 @@ def main():
             include = {line.strip() for line in f if line.strip()}
         print(f"[include] {len(include)} simpoint name(s); analysis restricted to these")
 
+    baseline = None
+    if args.baseline:
+        base_rows, base_skipped = load_rows(args.baseline, args.pattern, include)
+        baseline = {r['name']: r['ipc'] for r in base_rows}
+        print(f"[baseline] {args.baseline}: {len(baseline)} workloads (skipped {base_skipped})")
+
     for d in args.dirs:
-        aggregate(d, args.pattern, include)
+        aggregate(d, args.pattern, include, baseline=baseline, scatter=args.scatter)
 
 
 if __name__ == '__main__':

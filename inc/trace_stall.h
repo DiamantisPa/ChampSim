@@ -49,6 +49,11 @@ public:
     }
   }
 
+  // resolved-knob accessors (startup self-report)
+  [[nodiscard]] uint64_t min_occ() const { return threshold_; }
+  [[nodiscard]] std::size_t max_trace_uops() const { return max_uops; }
+  [[nodiscard]] bool l1i_gated() const { return l1i_gate_; }
+
   // L1I admission gate: when enabled, a costly stretch commits only if an L1I
   // miss was observed during it (note_l1i_miss).  Selects the stretches where a
   // zero-latency u-op replay saves the most: byte fetch AND decode.

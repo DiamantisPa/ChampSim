@@ -34,6 +34,9 @@ struct cpu_stats {
 
   // stall-triggered segmenter (see inc/trace_stall.h): traces recorded across a
   // build-mode stretch that drained the ROB (a costly backend-idle stall).
+  uint64_t store_evictions = 0;           // trace-store evictions (any geometry)
+  uint64_t store_conflict_evictions = 0;  // set-assoc evictions while the store was globally underfull (set skew)
+  uint64_t store_occupancy = 0;           // trace-store valid entries at end of phase (level, not subtracted)
   uint64_t stall_traces = 0;              // distinct traces committed (passed the occurrence filter)
   uint64_t stall_traces_candidates = 0;   // distinct stretch-start IPs seen (total, before filtering)
   uint64_t stall_dedup = 0;              // costly stretches whose start IP was already captured
@@ -80,7 +83,19 @@ struct cpu_stats {
   uint64_t chain_truncated = 0;         // committed traces cut to meta_windows window slots
   uint64_t chain_buf_hits = 0;          // demand hits served from the trace-uop buffer (then promoted)
   uint64_t chain_buf_evict_unused = 0;  // buffer windows evicted without ever being demanded (walk overshoot)
+  uint64_t chain_filtered_windows = 0;  // windows skipped at walk launch (already u-op-cache-resident or staged)
   std::array<uint64_t, 6> chain_slack{}; // probe->first-demand-touch cycles: <=4, <=8, <=16, <=32, <=64, >64
+  // UCP port (alternate-path u-op prefetching on H2P conditionals):
+  uint64_t ucp_cond_seen = 0;          // conditional branches observed (H2P detector denominator base)
+  uint64_t ucp_cond_misses = 0;        // conditional mispredictions (coverage denominator)
+  uint64_t ucp_h2p_marked = 0;         // conditionals classified hard-to-predict (accuracy denominator)
+  uint64_t ucp_h2p_marked_misses = 0;  // H2P-marked conditionals that actually mispredicted
+  uint64_t ucp_paths = 0;              // alternate paths generated (post-dedup/residency, pre-capacity)
+  uint64_t ucp_stop_sat = 0;           // walks ended by the weighted stop counter (>= threshold)
+  uint64_t ucp_stop_ind = 0;           // walks ended at an indirect branch (no Alt-Ind flavor)
+  uint64_t ucp_stop_btbmiss = 0;       // walks ended by a predicted-taken branch with no BTB target
+  uint64_t ucp_stop_maxip = 0;         // walks ended by the straight-line run limit
+  uint64_t ucp_ind_walked = 0;         // indirect branches walked through on a predicted target (Alt-Ind flavor)
   uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)

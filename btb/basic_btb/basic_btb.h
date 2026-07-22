@@ -17,7 +17,7 @@ public:
   using btb::btb;
   basic_btb() : btb(nullptr) {}
 
-  // void initialize_btb();
+  void initialize_btb(); // registers the UCP alt-path hooks (ucp_hooks.h)
   std::pair<champsim::address, bool> btb_prediction(champsim::address ip);
   void update_btb(champsim::address ip, champsim::address branch_target, bool taken, uint8_t branch_type);
 };

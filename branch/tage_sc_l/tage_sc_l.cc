@@ -11,6 +11,7 @@ using namespace std;
 
 #include "tage_sc_l.h"
 #include "instruction.h" // branch-type constants (BRANCH_CONDITIONAL, BRANCH_RETURN, ...)
+#include "ucp_hooks.h"   // publishes per-prediction H2P classification for the UCP port
 
 // TAGE-SC-L prediction-source tracking enums (were in the UCP_ISCA24 instruction.h)
 enum tagged_bank_prediction_type {
@@ -1693,11 +1694,27 @@ public:
 
 // ===== ChampSim module wrapper (replaces the UCP_ISCA24 O3_CPU glue) =====
 // NOTE: single-core only — the TAGE-SC-L core above keeps history in file-scope globals.
+
+// UCP H2P classification (paper Sec. IV-B, artifact flavor H2P_TAGE_STYLE_CTR_SC_BIMH):
+// a prediction is hard-to-predict when provided by an unsaturated HitBank counter, the
+// AltBank, an unsaturated bimodal counter, the SC, or bimodal with >=1 miss in the last
+// 8 bimodal-provided outcomes.  gtable ctr range [-4,3] (sat = -4/3); bimodal [0,3] (sat = 0/3).
+static uint8_t h2p_bimodal_miss_hist = 0;
+
+static bool classify_h2p(PREDICTOR* p)
+{
+  const auto src = p->get_last_source();
+  const auto ctr = p->get_last_pointer_for_pred();
+  return (src == HIT_BANK && (ctr > -4 && ctr < 3)) || (src == ALT_BANK) || (src == BIMODAL && (ctr != 0 && ctr != 3)) || (src == SAT_PRED)
+         || (src == BIMODAL && h2p_bimodal_miss_hist > 0);
+}
+
 bool tage_sc_l::predict_branch(champsim::address ip)
 {
   if (impl == nullptr)
     impl = new PREDICTOR();
   last_prediction = impl->GetPrediction(ip.to<uint64_t>(), BRANCH_CONDITIONAL, 0);
+  ucp::bp_last_h2p = classify_h2p(impl);
   return last_prediction;
 }
 
@@ -1707,8 +1724,15 @@ void tage_sc_l::last_branch_result(champsim::address ip, champsim::address branc
     impl = new PREDICTOR();
   const uint64_t pc = ip.to<uint64_t>();
   const uint64_t target = branch_target.to<uint64_t>();
-  if (branch_type == BRANCH_CONDITIONAL)
+  if (branch_type == BRANCH_CONDITIONAL) {
+    // provenance still describes this branch (predict_branch ran for it last)
+    if (impl->get_last_source() == BIMODAL) {
+      h2p_bimodal_miss_hist = static_cast<uint8_t>(h2p_bimodal_miss_hist << 1);
+      if (taken != last_prediction)
+        ++h2p_bimodal_miss_hist;
+    }
     impl->UpdatePredictor(pc, branch_type, taken, last_prediction, target);
-  else
+  } else {
     impl->TrackOtherInst(pc, branch_type, taken, target);
+  }
 }

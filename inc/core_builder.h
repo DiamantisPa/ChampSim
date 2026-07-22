@@ -48,6 +48,9 @@ struct core_builder_base {
   int m_trace_stall_rob{0};            // stall segmenter: ROB-occupancy trigger threshold (0 = fully empty)
   int m_trace_stall_depth{64};         // stall segmenter: max trace length in u-ops (truncation cap)
   int m_trace_store{256};              // trace-cache capacity in traces (bounded fill modes)
+  int m_trace_store_sets{0};           // trace store: sets (ways>0: geometry = sets x ways; ways==0: capacity override, 0 = use trace_store)
+  int m_trace_store_ways{0};           // trace store: associativity (0 = fully associative, the legacy design)
+  int m_trace_store_hash{0};           // trace store set index: 0 = plain modulo, 1 = xor-fold of higher PC bits
   int m_trace_walk_delay{5};           // alt fill: trigger-to-first-install latency in cycles
   int m_trace_walk_max{2};             // alt fill: max concurrent walks
   int m_trace_walk_width{1};           // alt fill: windows installed per walk per cycle
@@ -61,6 +64,15 @@ struct core_builder_base {
   int m_trace_uop_buffer{16};          // chain fill: trace-uop staging buffer capacity in windows (0 = install direct)
   int m_trace_meta_windows{4};         // chain fill: manifest window slots per trace (entry + 16-bit deltas)
   int m_trace_probe_ahead{0};          // chain fill: deep-probe lead in instructions ahead of enqueue (0 = enqueue only)
+  int m_trace_walk_filter{0};          // chain fill: 1 = stage only windows absent from the u-op cache and staging buffer
+  int m_trace_ucp{0};                  // UCP port: 1 = alternate-path u-op prefetching on H2P conditionals (ISCA'24)
+  int m_trace_ucp_threshold{500};      // UCP: Table-I weighted stop-counter threshold (paper H2P_T)
+  int m_trace_ucp_max_ip{64};          // UCP: straight-line steps without a branch before the walk stops
+  int m_trace_ucp_step{4};             // UCP: alt-path instruction stride in bytes (ARM traces: 4)
+  int m_trace_ucp_altind{0};           // UCP: 1 = 4KB Alt-ITTAGE, walks continue through indirects (12.95KB flavor)
+  int m_trace_walk_issue_cap{0};       // walks: global line-issues per cycle across all walks (0 = unlimited legacy schema)
+  int m_trace_walk_decode_cap{0};      // walks: global window-installs (pre-decodes) per cycle (0 = unlimited legacy schema)
+  int m_trace_walk_decode_shared{0};   // walks: 1 = installs only when demand is in stream mode (shared decoders, no dedicated hw)
   std::size_t m_ifetch_buffer_size{1};
   std::size_t m_decode_buffer_size{1};
   std::size_t m_dispatch_buffer_size{1};
@@ -180,6 +192,9 @@ public:
    * (miss/every/window/flush/parallel/alt); default 256.
    */
   self_type& trace_store(int trace_store_);
+  self_type& trace_store_sets(int trace_store_sets_);
+  self_type& trace_store_ways(int trace_store_ways_);
+  self_type& trace_store_hash(int trace_store_hash_);
 
   /**
    * ALT fill mode: walk latency in cycles from trigger to the first window
@@ -266,6 +281,26 @@ public:
    * enqueue only.  Default 0.
    */
   self_type& trace_probe_ahead(int trace_probe_ahead_);
+
+  /**
+   * CHAIN fill mode: per-window residency filter -- at walk launch, probe each
+   * of the trace's windows in the u-op cache and the staging buffer, and
+   * fetch/stage only the absent ones.  Default 0 (entry-window check only).
+   */
+  self_type& trace_walk_filter(int trace_walk_filter_);
+
+  /**
+   * UCP port (ISCA'24): alternate-path u-op cache prefetching on hard-to-predict
+   * conditionals.  Off by default; independent of the trace_fill mode.
+   */
+  self_type& trace_ucp(int trace_ucp_);
+  self_type& trace_ucp_threshold(int trace_ucp_threshold_);
+  self_type& trace_ucp_max_ip(int trace_ucp_max_ip_);
+  self_type& trace_ucp_step(int trace_ucp_step_);
+  self_type& trace_ucp_altind(int trace_ucp_altind_);
+  self_type& trace_walk_issue_cap(int trace_walk_issue_cap_);
+  self_type& trace_walk_decode_cap(int trace_walk_decode_cap_);
+  self_type& trace_walk_decode_shared(int trace_walk_decode_shared_);
 
   /**
    * Specify the maximum size of the instruction fetch buffer.
@@ -557,6 +592,27 @@ auto champsim::core_builder<B, T>::trace_stall_l1i_gate(int trace_stall_l1i_gate
 }
 
 template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_store_sets(int trace_store_sets_) -> self_type&
+{
+  m_trace_store_sets = trace_store_sets_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_store_ways(int trace_store_ways_) -> self_type&
+{
+  m_trace_store_ways = trace_store_ways_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_store_hash(int trace_store_hash_) -> self_type&
+{
+  m_trace_store_hash = trace_store_hash_;
+  return *this;
+}
+
+template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_store_cost_evict(int trace_store_cost_evict_) -> self_type&
 {
   m_trace_store_cost_evict = trace_store_cost_evict_;
@@ -595,6 +651,69 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_probe_ahead(int trace_probe_ahead_) -> self_type&
 {
   m_trace_probe_ahead = trace_probe_ahead_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_filter(int trace_walk_filter_) -> self_type&
+{
+  m_trace_walk_filter = trace_walk_filter_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_ucp(int trace_ucp_) -> self_type&
+{
+  m_trace_ucp = trace_ucp_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_ucp_threshold(int trace_ucp_threshold_) -> self_type&
+{
+  m_trace_ucp_threshold = trace_ucp_threshold_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_ucp_max_ip(int trace_ucp_max_ip_) -> self_type&
+{
+  m_trace_ucp_max_ip = trace_ucp_max_ip_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_ucp_step(int trace_ucp_step_) -> self_type&
+{
+  m_trace_ucp_step = trace_ucp_step_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_ucp_altind(int trace_ucp_altind_) -> self_type&
+{
+  m_trace_ucp_altind = trace_ucp_altind_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_issue_cap(int trace_walk_issue_cap_) -> self_type&
+{
+  m_trace_walk_issue_cap = trace_walk_issue_cap_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_decode_cap(int trace_walk_decode_cap_) -> self_type&
+{
+  m_trace_walk_decode_cap = trace_walk_decode_cap_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_walk_decode_shared(int trace_walk_decode_shared_) -> self_type&
+{
+  m_trace_walk_decode_shared = trace_walk_decode_shared_;
   return *this;
 }
 

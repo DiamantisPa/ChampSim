@@ -23,6 +23,7 @@ struct direct_predictor {
     champsim::address ip_tag{};
     champsim::address target{};
     branch_info type = branch_info::ALWAYS_TAKEN;
+    uint8_t raw_type = 0; // raw BRANCH_* constant (UCP alt-path walker needs to tell calls from jumps)
 
     auto index() const
     {

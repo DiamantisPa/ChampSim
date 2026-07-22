@@ -9,6 +9,31 @@
 #include "basic_btb.h"
 
 #include "instruction.h"
+#include "ucp_hooks.h"
+
+void basic_btb::initialize_btb()
+{
+  // UCP alt-path hooks (single-core): BTB-only probe -- no RAS pop, no ITTAGE
+  // history perturbation; the walker keeps its own Alt-RAS from the snapshot.
+  ucp::btb_probe = [this](uint64_t ip) -> std::optional<ucp::btb_probe_result> {
+    auto entry = direct.check_hit(champsim::address{ip});
+    if (!entry.has_value())
+      return std::nullopt;
+    ucp::btb_probe_result r;
+    r.branch_type = entry->raw_type;
+    r.conditional = (entry->type == direct_predictor::branch_info::CONDITIONAL);
+    r.target = (entry->type == direct_predictor::branch_info::RETURN) ? 0 : entry->target.to<uint64_t>();
+    return r;
+  };
+  ucp::btb_ras_snapshot = [this]() {
+    std::vector<uint64_t> targets;
+    for (const auto& call_ip : ras.stack) { // bottom-to-top; walker pops from the back
+      auto size = ras.call_size_trackers[call_ip.slice_lower<champsim::data::bits{champsim::msl::lg2(return_stack::num_call_size_trackers)}>().to<std::size_t>()];
+      targets.push_back((call_ip + size).to<uint64_t>());
+    }
+    return targets;
+  };
+}
 
 std::pair<champsim::address, bool> basic_btb::btb_prediction(champsim::address ip)
 {

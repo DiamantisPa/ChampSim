@@ -31,6 +31,9 @@
 #include "deadlock.h"
 #include "event_listeners.h"
 #include "instruction.h"
+#include "ucp_alt_tage.h"   // UCP port: dedicated 8KB Alt-BP (TAGE_PREDICTOR_8KB)
+#include "ucp_alt_ittage.h" // UCP port: dedicated 4KB Alt-Ind (12.95KB flavor) -- must follow ucp_alt_tage.h
+#include "ucp_hooks.h"    // UCP port: BTB probe / RAS snapshot / H2P flag from the modules
 #include "util/span.h"
 
 long O3_CPU::operate()
@@ -50,6 +53,12 @@ long O3_CPU::operate()
   progress += fetch_instruction(); // fetch
   progress += check_dib();
   initialize_instruction();
+
+  // cumulative store counters mirrored into stats each cycle so the ROI
+  // subtraction (sim - warmup snapshot) yields per-phase deltas
+  sim_stats.store_evictions = fill_store.evictions();
+  sim_stats.store_conflict_evictions = fill_store.conflict_evictions();
+  sim_stats.store_occupancy = fill_store.size();
 
   return progress;
 }
@@ -209,6 +218,10 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
   sim_stats.total_branch_types.increment(arch_instr.branch);
   auto [predicted_branch_target, always_taken] = impl_btb_prediction(arch_instr.ip, arch_instr.branch);
   arch_instr.branch_prediction = impl_predict_branch(arch_instr.ip, predicted_branch_target, always_taken, arch_instr.branch) || always_taken;
+  // UCP: capture the H2P classification and the raw BTB target now -- the flag is
+  // per-prediction (next predict overwrites it) and the target is zeroed below
+  const bool ucp_h2p_now = ucp_enable && ucp::bp_last_h2p;
+  const uint64_t ucp_btb_target = predicted_branch_target.to<uint64_t>();
   if (!arch_instr.branch_prediction) {
     predicted_branch_target = champsim::address{};
   }
@@ -235,6 +248,12 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
       stop_fetch = arch_instr.branch_taken; // if correctly predicted taken, then we can't fetch anymore instructions this cycle
     }
 
+    // UCP: classify/trigger BEFORE the predictor and BTB update (artifact order --
+    // the walk must see pre-update state); Alt-BP training happens inside
+    if (ucp_enable && !warmup) {
+      do_ucp_branch(arch_instr, ucp_btb_target, always_taken, ucp_h2p_now);
+    }
+
     impl_update_btb(arch_instr.ip, arch_instr.branch_target, arch_instr.branch_taken, arch_instr.branch);
     impl_last_branch_result(arch_instr.ip, arch_instr.branch_target, arch_instr.branch_taken, arch_instr.branch);
   }
@@ -257,7 +276,7 @@ bool O3_CPU::do_init_instruction(ooo_model_instr& arch_instr)
 long O3_CPU::check_dib()
 {
   // ALT/HEAD/CHAIN trace-fill: advance in-flight pre-decode walks (timed installs) once per cycle
-  if ((fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD || fill_mode == fill_mode_type::CHAIN) && !alt_walks.empty()) {
+  if ((fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD || fill_mode == fill_mode_type::CHAIN || ucp_enable) && !alt_walks.empty()) {
     drain_alt_walks();
   }
   // scan through IFETCH_BUFFER to find instructions that hit in the decoded instruction buffer
@@ -276,12 +295,59 @@ long O3_CPU::check_dib()
 
 // ALT trace-fill: install ready windows of in-flight walks, one window per walk per
 // cycle after the base delay (models L1I fetch + pre-decode through idle decode slots).
+// global walk line-issue port model (trace_walk_issue_cap): lazily reset the
+// per-cycle budget; 0 = unlimited (legacy schema).
+bool O3_CPU::walk_issue_available()
+{
+  if (alt_walk_issue_cap <= 0) {
+    return true;
+  }
+  if (walk_issue_stamp != current_time) {
+    walk_issue_stamp = current_time;
+    walk_issue_count = 0;
+  }
+  return walk_issue_count < alt_walk_issue_cap;
+}
+
+void O3_CPU::walk_issue_note()
+{
+  if (alt_walk_issue_cap > 0) {
+    ++walk_issue_count;
+  }
+}
+
+// walk pre-decode model (trace_walk_decode_cap / trace_walk_decode_shared): a
+// window install = one pre-decode.  The cap is a per-cycle budget across all
+// walks (incl. catch-up bursts); shared mode additionally requires the demand
+// path to be in stream mode (regular decoders idle) -- UCP's SharedDecoders rule.
+bool O3_CPU::walk_decode_available()
+{
+  if (alt_walk_decode_shared && fetch_mode != fetch_mode_type::STREAM) {
+    return false; // demand owns the decoders this cycle
+  }
+  if (alt_walk_decode_cap <= 0) {
+    return true;
+  }
+  if (walk_decode_stamp != current_time) {
+    walk_decode_stamp = current_time;
+    walk_decode_count = 0;
+  }
+  return walk_decode_count < alt_walk_decode_cap;
+}
+
+void O3_CPU::walk_decode_note()
+{
+  if (alt_walk_decode_cap > 0) {
+    ++walk_decode_count;
+  }
+}
+
 void O3_CPU::drain_alt_walks()
 {
   for (auto& w : alt_walks) {
     // real-L1I mode: issue one pending line per walk per cycle through the L1I
     // (contends with demand for rq slots and MSHRs; misses go to L2/LLC/DRAM)
-    if (alt_walk_l1i && !w.lines_pending.empty()) {
+    if (alt_walk_l1i && !w.lines_pending.empty() && walk_issue_available()) {
       CacheBus::request_type line_pkt;
       line_pkt.v_address = champsim::address{w.lines_pending.front()};
       line_pkt.ip = champsim::address{w.lines_pending.front()};
@@ -290,6 +356,7 @@ void O3_CPU::drain_alt_walks()
         w.lines_pending.pop_front();
         ++sim_stats.alt_lines_issued;
         w.last_progress = current_time;
+        walk_issue_note();
       }
     }
     while (w.idx < w.windows.size() && w.ready <= current_time) {
@@ -299,13 +366,16 @@ void O3_CPU::drain_alt_walks()
         ++sim_stats.alt_line_stalls;
         break; // pre-decode stalls on the byte fetch; retry next cycle
       }
+      if (!walk_decode_available()) {
+        break; // no pre-decode slot this cycle (cap reached / demand owns shared decoders); retry next cycle
+      }
       // install up to alt_walk_width windows per cycle (pre-decode width)
-      for (int k = 0; k < alt_walk_width && w.idx < w.windows.size(); ++k) {
+      for (int k = 0; k < alt_walk_width && w.idx < w.windows.size() && walk_decode_available(); ++k) {
         if (alt_walk_l1i && k > 0
             && w.lines_ready.count(champsim::block_number{champsim::address{w.windows[w.idx].front()}}.to<uint64_t>()) == 0) {
           break;
         }
-        if (fill_mode == fill_mode_type::CHAIN && uop_buffer_windows > 0) {
+        if (fill_mode == fill_mode_type::CHAIN && uop_buffer_windows > 0 && !w.ucp) {
           // CHAIN: stage into the trace-uop buffer (no u-op-cache pollution);
           // demand hits promote from there
           uop_buffer_push(w.windows[w.idx], w.probe_time);
@@ -315,6 +385,7 @@ void O3_CPU::drain_alt_walks()
         }
         ++w.idx;
         w.last_progress = current_time;
+        walk_decode_note();
       }
       w.ready += clock_period;
     }
@@ -398,15 +469,52 @@ std::vector<uint64_t> O3_CPU::chain_encode(const std::vector<uint64_t>& ips, boo
 void O3_CPU::do_chain_trigger(const std::vector<uint64_t>& ips)
 {
   const uint64_t entry = ips.front();
-  if (DIB.probe(champsim::address{entry})) {
-    return; // entry window already resident: nothing to prefetch
-  }
-  const uint64_t etag = entry >> dib_window_bits;
-  if (std::any_of(std::begin(uop_buffer), std::end(uop_buffer), [etag](const auto& e) { return e.tag == etag; })) {
-    return; // already staged
-  }
   if (std::any_of(std::begin(alt_walks), std::end(alt_walks), [entry](const auto& w) { return w.entry == entry; })) {
     return; // already being walked
+  }
+  if (!alt_walk_filter) {
+    // legacy check: skip the walk only when the ENTRY window is resident/staged
+    if (DIB.probe(champsim::address{entry})) {
+      return;
+    }
+    const uint64_t etag = entry >> dib_window_bits;
+    if (std::any_of(std::begin(uop_buffer), std::end(uop_buffer), [etag](const auto& e) { return e.tag == etag; })) {
+      return;
+    }
+  }
+  // group the trace's uops into aligned windows, in path order
+  std::vector<std::vector<uint64_t>> groups;
+  uint64_t last = 0;
+  bool have_last = false;
+  for (uint64_t raw : ips) {
+    const uint64_t tag = raw >> dib_window_bits;
+    if (have_last && tag == last) {
+      groups.back().push_back(raw);
+      continue;
+    }
+    have_last = true;
+    last = tag;
+    groups.push_back({raw});
+  }
+  if (alt_walk_filter) {
+    // per-window residency filter: fetch/stage ONLY windows absent from both the
+    // u-op cache and the staging buffer.  Redundant staging is the main source of
+    // wasted line fetches, hogged walk slots, and unconsumed buffer entries.
+    groups.erase(std::remove_if(std::begin(groups), std::end(groups),
+                                [this](const auto& g) {
+                                  const uint64_t tag = g.front() >> dib_window_bits;
+                                  const bool resident = DIB.probe(champsim::address{g.front()})
+                                                        || std::any_of(std::begin(uop_buffer), std::end(uop_buffer),
+                                                                       [tag](const auto& e) { return e.tag == tag; });
+                                  if (resident) {
+                                    ++sim_stats.chain_filtered_windows;
+                                  }
+                                  return resident;
+                                }),
+                 std::end(groups));
+    if (groups.empty()) {
+      return; // fully resident: nothing to walk (not a drop, not a trigger)
+    }
   }
   if (alt_walks.size() >= alt_walk_max) {
     ++sim_stats.alt_drops;
@@ -417,18 +525,7 @@ void O3_CPU::do_chain_trigger(const std::vector<uint64_t>& ips)
   w.ready = current_time + alt_walk_delay_cycles * clock_period;
   w.last_progress = current_time;
   w.probe_time = current_time;
-  uint64_t last = 0;
-  bool have_last = false;
-  for (uint64_t raw : ips) {
-    const uint64_t tag = raw >> dib_window_bits;
-    if (have_last && tag == last) {
-      w.windows.back().push_back(raw);
-      continue;
-    }
-    have_last = true;
-    last = tag;
-    w.windows.push_back({raw});
-  }
+  w.windows = std::move(groups);
   if (alt_walk_l1i) {
     uint64_t last_blk = 0;
     bool have_blk = false;
@@ -442,7 +539,7 @@ void O3_CPU::do_chain_trigger(const std::vector<uint64_t>& ips)
       w.lines_pending.push_back(win.front());
     }
     // all line addresses are known from the manifest: issue up to two this cycle
-    for (int n = 0; n < 2 && !w.lines_pending.empty(); ++n) {
+    for (int n = 0; n < 2 && !w.lines_pending.empty() && walk_issue_available(); ++n) {
       CacheBus::request_type line_pkt;
       line_pkt.v_address = champsim::address{w.lines_pending.front()};
       line_pkt.ip = champsim::address{w.lines_pending.front()};
@@ -452,6 +549,237 @@ void O3_CPU::do_chain_trigger(const std::vector<uint64_t>& ips)
       }
       w.lines_pending.pop_front();
       ++sim_stats.alt_lines_issued;
+      walk_issue_note();
+    }
+  }
+  alt_walks.push_back(std::move(w));
+  ++sim_stats.alt_triggers;
+}
+
+// ===== UCP port (Singh et al., ISCA'24): alternate-path u-op cache prefetching =====
+// Trigger: a hard-to-predict conditional at prediction time (classification from
+// TAGE-SC-L provenance, published via ucp_hooks.h).  The walker follows the
+// NOT-predicted direction -- targets from the real BTB, conditional directions
+// from the dedicated 8KB Alt-BP, returns from an Alt-RAS snapshot -- and the
+// resulting windows are prefetched into the u-op cache through the existing
+// alt-walk machinery (prefetch-class installs, bytes through the real L1I).
+
+void O3_CPU::do_ucp_branch(const ooo_model_instr& arch_instr, uint64_t btb_target, bool always_taken, bool h2p)
+{
+  if (!ucp::btb_probe || !ucp::btb_ras_snapshot) {
+    return; // configured modules do not provide the UCP hooks (needs basic_btb + tage_sc_l)
+  }
+  if (ucp_altbp == nullptr) {
+    ucp_altbp = new TAGE_PREDICTOR_8KB();
+  }
+  if (ucp_altind_enable && ucp_altind == nullptr) {
+    ucp_altind = new alt_ittage();
+  }
+  const uint64_t pc = arch_instr.ip.to<uint64_t>();
+  const uint64_t target = arch_instr.branch_target.to<uint64_t>();
+  if (ucp_altind != nullptr) {
+    // train along the demand stream, like the main ITTAGE (indirect tables train
+    // internally only for indirect branches; history advances for every branch)
+    ucp_altind->update_brindirect(pc, arch_instr.branch, arch_instr.branch_taken, target);
+    ucp_altind->fetch_history_update(pc, arch_instr.branch, arch_instr.branch_taken, target);
+  }
+
+  if (arch_instr.branch == BRANCH_CONDITIONAL) {
+    // Alt-BP protocol: predict-before-update keeps its internal indices consistent
+    // and its history in sync with the demand stream (artifact order)
+    (void)ucp_altbp->GetPrediction(pc);
+
+    ++sim_stats.ucp_cond_seen;
+    const bool miss = (arch_instr.branch_taken != arch_instr.branch_prediction);
+    if (miss) {
+      ++sim_stats.ucp_cond_misses;
+    }
+    if (h2p && !always_taken) {
+      ++sim_stats.ucp_h2p_marked;
+      if (miss) {
+        ++sim_stats.ucp_h2p_marked_misses;
+      }
+      // walk the NOT-predicted direction: predicted-taken -> fall-through,
+      // predicted-not-taken -> the BTB target (0 = unknown, cannot start)
+      const uint64_t start = arch_instr.branch_prediction ? pc + static_cast<uint64_t>(ucp_step) : btb_target;
+      if (start != 0) {
+        auto ips = ucp_generate_alt_path(arch_instr, start);
+        if (!ips.empty()) {
+          do_ucp_trigger(pc, ips);
+        }
+      }
+    }
+    ucp_altbp->UpdatePredictor(pc, arch_instr.branch, arch_instr.branch_taken, target, miss);
+  } else {
+    ucp_altbp->TrackOtherInst(pc, arch_instr.branch, arch_instr.branch_taken, target);
+  }
+}
+
+std::vector<uint64_t> O3_CPU::ucp_generate_alt_path(const ooo_model_instr& h2p_instr, uint64_t start)
+{
+  const uint64_t pc = h2p_instr.ip.to<uint64_t>();
+  // checkpoint the Alt-BP: its GHR diverges with the walked (alternate) directions
+  // during the walk and is restored at speculative_end (paper IV-C)
+  ucp_altbp->speculative_begin(pc, h2p_instr.branch, !h2p_instr.branch_prediction, start);
+  if (ucp_altind != nullptr) {
+    ucp_altind->speculative_begin();
+  }
+  auto alt_ras = ucp::btb_ras_snapshot(); // Alt-RAS: copy of the main RAS at trigger time
+
+  std::vector<uint64_t> ips;
+  uint64_t m_ip = start;
+  int end_counter = 0; // Table-I weighted stop counter (paper IV-E)
+  int run = 0;         // straight-line steps since the last BTB-known branch
+  bool done = false;
+  while (!done) {
+    const auto pb = ucp::btb_probe(m_ip);
+    bool pred = false;
+    uint64_t tgt = 0;
+    uint8_t bt = NOT_BRANCH;
+    if (pb.has_value()) {
+      bt = pb->branch_type;
+      tgt = pb->target;
+      if (pb->conditional) {
+        pred = ucp_altbp->GetPrediction(m_ip);
+        end_counter += ucp_altbp->is_h2p(m_ip); // Table-I weight from the Alt-BP's own provenance
+      } else {
+        pred = true;
+        end_counter += 1;
+      }
+      if (bt == BRANCH_INDIRECT || bt == BRANCH_INDIRECT_CALL) {
+        if (ucp_altind != nullptr) {
+          tgt = ucp_altind->predict_brindirect(m_ip); // 12.95KB flavor: continue on a predicted target
+          if (tgt == 0) {
+            ++sim_stats.ucp_stop_ind; // Alt-Ind had no prediction
+            done = true;
+          } else {
+            ++sim_stats.ucp_ind_walked;
+            if (bt == BRANCH_INDIRECT_CALL) {
+              alt_ras.push_back(m_ip + static_cast<uint64_t>(ucp_step));
+            }
+          }
+        } else {
+          ++sim_stats.ucp_stop_ind; // no-Alt-Ind flavor: target unknown, stop after this instruction
+          done = true;
+        }
+      }
+      if (bt == BRANCH_RETURN) {
+        if (alt_ras.empty()) {
+          tgt = 0; // falls out as a BTB-miss stop below
+        } else {
+          tgt = alt_ras.back();
+          alt_ras.pop_back();
+        }
+      }
+      if (bt == BRANCH_DIRECT_CALL) {
+        alt_ras.push_back(m_ip + static_cast<uint64_t>(ucp_step));
+      }
+    } else {
+      end_counter += 1; // artifact counts every stepped instruction toward the threshold
+    }
+    ips.push_back(m_ip);
+    if (done) {
+      break;
+    }
+    if (pb.has_value()) {
+      // speculative Alt-BP/Alt-Ind updates along the alternate path (undone at speculative_end)
+      if (pb->conditional) {
+        ucp_altbp->UpdatePredictor(m_ip, bt, pred, tgt, false);
+      } else {
+        ucp_altbp->TrackOtherInst(m_ip, bt, pred, tgt);
+      }
+      if (ucp_altind != nullptr) {
+        ucp_altind->update_brindirect(m_ip, bt, pred, tgt);
+        ucp_altind->fetch_history_update(m_ip, bt, pred, tgt);
+      }
+      run = 0;
+    } else if (++run >= ucp_max_ip_check) {
+      ++sim_stats.ucp_stop_maxip;
+      break;
+    }
+    if (pb.has_value() && pred && tgt == 0) {
+      ++sim_stats.ucp_stop_btbmiss; // predicted taken with no known target
+      break;
+    }
+    m_ip = (pb.has_value() && pred && tgt != 0) ? tgt : m_ip + static_cast<uint64_t>(ucp_step);
+    if (end_counter >= ucp_threshold) {
+      ++sim_stats.ucp_stop_sat;
+      break;
+    }
+    if (ips.size() >= 4096) {
+      break; // safety net against degenerate paths
+    }
+  }
+  ucp_altbp->speculative_end();
+  if (ucp_altind != nullptr) {
+    ucp_altind->speculative_end();
+  }
+  return ips;
+}
+
+void O3_CPU::do_ucp_trigger(uint64_t h2p_ip, const std::vector<uint64_t>& ips)
+{
+  if (std::any_of(std::begin(alt_walks), std::end(alt_walks), [h2p_ip](const auto& w) { return w.entry == h2p_ip; })) {
+    return; // this H2P's alternate path is already in flight
+  }
+  // group the path's instructions into aligned windows, in path order, DEDUPED by
+  // window tag: the artifact's uop-MSHR fetches/installs each line once per path
+  // (loop iterations re-hitting a window must not re-install it -- pure churn)
+  std::vector<std::vector<uint64_t>> groups;
+  std::set<uint64_t> seen_tags;
+  for (uint64_t raw : ips) {
+    const uint64_t tag = raw >> dib_window_bits;
+    if (!seen_tags.insert(tag).second) {
+      if (!groups.empty() && (groups.back().front() >> dib_window_bits) == tag) {
+        groups.back().push_back(raw); // still filling the window's first visit
+      }
+      continue;
+    }
+    groups.push_back({raw});
+  }
+  // alt-FTQ tag check (paper IV-D): prefetch only windows absent from the u-op cache
+  groups.erase(std::remove_if(std::begin(groups), std::end(groups),
+                              [this](const auto& g) { return DIB.probe(champsim::address{g.front()}); }),
+               std::end(groups));
+  if (groups.empty()) {
+    return; // fully resident: nothing to prefetch
+  }
+  ++sim_stats.ucp_paths;
+  if (alt_walks.size() >= alt_walk_max) {
+    ++sim_stats.alt_drops;
+    return;
+  }
+  alt_walk w;
+  w.entry = h2p_ip;
+  w.ucp = true;
+  w.ready = current_time + alt_walk_delay_cycles * clock_period;
+  w.last_progress = current_time;
+  w.probe_time = current_time;
+  w.windows = std::move(groups);
+  if (alt_walk_l1i) {
+    uint64_t last_blk = 0;
+    bool have_blk = false;
+    for (const auto& win : w.windows) {
+      const uint64_t blk = champsim::block_number{champsim::address{win.front()}}.to<uint64_t>();
+      if (have_blk && blk == last_blk) {
+        continue;
+      }
+      have_blk = true;
+      last_blk = blk;
+      w.lines_pending.push_back(win.front());
+    }
+    // all line addresses are known at trigger: issue up to two this cycle
+    for (int n = 0; n < 2 && !w.lines_pending.empty() && walk_issue_available(); ++n) {
+      CacheBus::request_type line_pkt;
+      line_pkt.v_address = champsim::address{w.lines_pending.front()};
+      line_pkt.ip = champsim::address{w.lines_pending.front()};
+      line_pkt.instr_id = 0;
+      if (!L1I_bus.issue_read(line_pkt)) {
+        break;
+      }
+      w.lines_pending.pop_front();
+      ++sim_stats.alt_lines_issued;
+      walk_issue_note();
     }
   }
   alt_walks.push_back(std::move(w));
@@ -1407,7 +1735,7 @@ long O3_CPU::handle_memory_return()
 
     // real-L1I walk mode: any arriving line (walk-issued or demand, incl. MSHR merges)
     // marks that block ready in all in-flight walks
-    if ((fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD || fill_mode == fill_mode_type::CHAIN) && alt_walk_l1i
+    if ((fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD || fill_mode == fill_mode_type::CHAIN || ucp_enable) && alt_walk_l1i
         && !alt_walks.empty()) {
       const uint64_t blk = champsim::block_number{l1i_entry.v_address}.to<uint64_t>();
       for (auto& w : alt_walks) {
