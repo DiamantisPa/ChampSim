@@ -566,6 +566,16 @@ public:
         cost_evict = std::atoi(e); // evict min-stall-cost trace instead of LRU
       }
       fill_store.set_cost_policy(cost_evict != 0);
+      int cost_decay = b.m_trace_store_cost_decay;
+      if (const char* e = std::getenv("PROMETHEUS_STORE_COST_DECAY"); e != nullptr && *e != '\0') {
+        cost_decay = std::atoi(e); // halve costs every N insertions (0 = off)
+      }
+      fill_store.set_cost_decay(static_cast<uint64_t>(cost_decay < 0 ? 0 : cost_decay));
+      int cost_bits = b.m_trace_store_cost_bits;
+      if (const char* e = std::getenv("PROMETHEUS_STORE_COST_BITS"); e != nullptr && *e != '\0') {
+        cost_bits = std::atoi(e); // saturating counter width (0 = unbounded)
+      }
+      fill_store.set_cost_bits(static_cast<unsigned>(cost_bits < 0 ? 0 : cost_bits));
       head_uops = (b.m_trace_head_uops < 0) ? 0 : b.m_trace_head_uops;
       if (const char* e = std::getenv("PROMETHEUS_HEAD_UOPS"); e != nullptr && *e != '\0') {
         head_uops = std::max(0, std::atoi(e)); // instantly-servable head length
@@ -651,7 +661,9 @@ public:
     std::cout << "Prometheus knobs: fill=" << b.m_trace_fill << " min_occ=" << stall.min_occ() << " rob=" << stall_rob_threshold
               << " depth=" << stall.max_trace_uops() << " l1i_gate=" << stall.l1i_gated() << " meta_windows=" << meta_windows
               << " store=" << fill_store.cap() << " sets=" << fill_store.sets() << " ways=" << fill_store.ways() << " hash=" << fill_store.hash_mode()
-              << " cost_evict=" << fill_store.cost_policy() << " walk_max=" << alt_walk_max << " walk_width=" << alt_walk_width
+              << " cost_evict=" << fill_store.cost_policy() << " cost_decay=" << fill_store.cost_decay() << " cost_bits=" << fill_store.cost_bits()
+              << " walk_max=" << alt_walk_max
+              << " walk_width=" << alt_walk_width
               << " walk_delay=" << alt_walk_delay_cycles << " walk_l1i=" << alt_walk_l1i << " walk_wait=" << alt_walk_wait
               << " wait_cap=" << alt_walk_wait_cap << " issue_cap=" << alt_walk_issue_cap << " decode_cap=" << alt_walk_decode_cap
               << " decode_shared=" << alt_walk_decode_shared << " walk_filter=" << alt_walk_filter << " uop_buffer=" << uop_buffer_windows

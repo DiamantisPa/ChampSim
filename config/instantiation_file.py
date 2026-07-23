@@ -37,6 +37,8 @@ core_builder_parts = {
     'trace_store_sets': '.trace_store_sets({trace_store_sets})',
     'trace_store_ways': '.trace_store_ways({trace_store_ways})',
     'trace_store_hash': '.trace_store_hash({trace_store_hash})',
+    'trace_store_cost_decay': '.trace_store_cost_decay({trace_store_cost_decay})',
+    'trace_store_cost_bits': '.trace_store_cost_bits({trace_store_cost_bits})',
     'trace_walk_delay': '.trace_walk_delay({trace_walk_delay})',
     'trace_walk_max': '.trace_walk_max({trace_walk_max})',
     'trace_walk_width': '.trace_walk_width({trace_walk_width})',

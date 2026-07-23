@@ -51,6 +51,8 @@ struct core_builder_base {
   int m_trace_store_sets{0};           // trace store: sets (ways>0: geometry = sets x ways; ways==0: capacity override, 0 = use trace_store)
   int m_trace_store_ways{0};           // trace store: associativity (0 = fully associative, the legacy design)
   int m_trace_store_hash{0};           // trace store set index: 0 = plain modulo, 1 = xor-fold of higher PC bits
+  int m_trace_store_cost_decay{0};     // cost_evict aging: halve costs every N insertions (0 = off)
+  int m_trace_store_cost_bits{0};      // cost counter width in bits, saturating (0 = unbounded idealized)
   int m_trace_walk_delay{5};           // alt fill: trigger-to-first-install latency in cycles
   int m_trace_walk_max{2};             // alt fill: max concurrent walks
   int m_trace_walk_width{1};           // alt fill: windows installed per walk per cycle
@@ -195,6 +197,8 @@ public:
   self_type& trace_store_sets(int trace_store_sets_);
   self_type& trace_store_ways(int trace_store_ways_);
   self_type& trace_store_hash(int trace_store_hash_);
+  self_type& trace_store_cost_decay(int trace_store_cost_decay_);
+  self_type& trace_store_cost_bits(int trace_store_cost_bits_);
 
   /**
    * ALT fill mode: walk latency in cycles from trigger to the first window
@@ -609,6 +613,20 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_store_hash(int trace_store_hash_) -> self_type&
 {
   m_trace_store_hash = trace_store_hash_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_store_cost_decay(int trace_store_cost_decay_) -> self_type&
+{
+  m_trace_store_cost_decay = trace_store_cost_decay_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_store_cost_bits(int trace_store_cost_bits_) -> self_type&
+{
+  m_trace_store_cost_bits = trace_store_cost_bits_;
   return *this;
 }
 

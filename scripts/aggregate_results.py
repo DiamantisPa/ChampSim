@@ -27,6 +27,7 @@ RE_STG = re.compile(r'trace-stg: loop (\d+) function (\d+) dedup-hits (\d+) enta
 RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
 RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)(?: l1i-gated (\d+))?', re.M)
 RE_STALL_COV = re.compile(r'trace-stall coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
+RE_STORE = re.compile(r'trace-store: evictions (\d+) conflict-evictions (\d+) occupancy (\d+)', re.M)
 BKT_LABELS = [16, 32, 64, 128, 256, 512, 1024]
 _bkt = ' '.join(fr'{n}=([\d.-]+)%' for n in BKT_LABELS)
 RE_STALL_OCC = re.compile(r'trace-stall top-by-occurrence \(cum% dyn-weight\): ' + _bkt, re.M)
@@ -129,6 +130,9 @@ def parse_file(path):
     if stc:
         d['stall_uniq_cov'], d['stall_uniq_seen'] = int(stc.group(1)), int(stc.group(2))
         d['stall_dyn_cov'], d['stall_dyn_tot'] = int(stc.group(3)), int(stc.group(4))
+    sto = RE_STORE.search(txt)
+    if sto:
+        d['store_evict'], d['store_conflict'], d['store_occ'] = int(sto.group(1)), int(sto.group(2)), int(sto.group(3))
 
     def _floats(m):
         out = []
@@ -310,6 +314,12 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
         if gated and amean(gated) > 0:
             print(f"l1i-gated out:     {amean(gated):,.0f} costly stretches (no L1I miss observed)")
         print(f"stored u-ops:      {amean([r['stall_stored_uops'] for r in have_stall]):,.0f}")
+        have_store = [r for r in have_stall if 'store_evict' in r]
+        if have_store:
+            ev = amean([r['store_evict'] for r in have_store])
+            cf = amean([pct(r['store_conflict'], r['store_evict']) for r in have_store if r['store_evict']])
+            print(f"store:             occupancy {amean([r['store_occ'] for r in have_store]):,.0f}   "
+                  f"evictions {ev:,.0f} ({cf:.1f}% conflict = while underfull)")
         cov_have = [r for r in have_stall if 'stall_dyn_tot' in r]
         if cov_have:
             dyn = amean([pct(r['stall_dyn_cov'], r['stall_dyn_tot']) for r in cov_have if r['stall_dyn_tot']])

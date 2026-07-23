@@ -69,8 +69,36 @@ public:
   // set-index hash: false = plain modulo (legacy first-cut), true = xor-fold
   void set_hash(bool xor_hash_) { xor_hash = xor_hash_; }
 
+  // cost aging for cost_evict: halve every resident cost each `period`
+  // insertions (0 = off).  Without aging, accumulated costs fossilize stale
+  // traces (measured -3.5pp); periodic halving keeps the ranking recent.
+  void set_cost_decay(uint64_t period) { decay_period = period; }
+  [[nodiscard]] uint64_t cost_decay() const { return decay_period; }
+
+  // model a finite saturating cost counter: N bits -> values clamp at 2^N-1
+  // (0 = unbounded, the idealized default).  Eviction picks the minimum cost,
+  // so saturation at the top should be harmless -- this knob proves it.
+  void set_cost_bits(unsigned bits) { cost_cap = (bits == 0 || bits >= 64) ? 0 : ((uint64_t{1} << bits) - 1); }
+  [[nodiscard]] unsigned cost_bits() const
+  {
+    if (cost_cap == 0) {
+      return 0;
+    }
+    unsigned b = 0;
+    for (uint64_t v = cost_cap; v != 0; v >>= 1) {
+      ++b;
+    }
+    return b;
+  }
+
   void insert(uint64_t entry, const std::vector<uint64_t>& ips, uint64_t cost = 0)
   {
+    cost = clamp_cost(cost);
+    if (decay_period > 0 && ++n_insert % decay_period == 0) {
+      for (auto& e : entries) {
+        e.cost >>= 1;
+      }
+    }
     if (auto it = entry_index.find(entry); it != entry_index.end()) { // refresh
       const std::size_t slot = it->second;
       if (window_indexed) {
@@ -133,7 +161,7 @@ public:
   void update_cost(uint64_t entry, uint64_t cost)
   {
     if (auto it = entry_index.find(entry); it != entry_index.end()) {
-      entries[it->second].cost = cost;
+      entries[it->second].cost = clamp_cost(cost);
     }
   }
 
@@ -244,8 +272,13 @@ private:
   std::size_t live = 0;      // valid-entry count in set-associative mode
   unsigned window_bits = 0;
   bool window_indexed = false;
+  [[nodiscard]] uint64_t clamp_cost(uint64_t c) const { return (cost_cap > 0 && c > cost_cap) ? cost_cap : c; }
+
   bool cost_evict = false;
   bool xor_hash = false;
+  uint64_t cost_cap = 0;     // saturating cost ceiling (0 = unbounded idealized counter)
+  uint64_t decay_period = 0; // cost halving interval in insertions (0 = off)
+  uint64_t n_insert = 0;
   uint64_t tick = 0;
   uint64_t n_evict = 0;          // total evictions (any mode)
   uint64_t n_conflict_evict = 0; // set-assoc evictions while the store was globally underfull (set skew)
