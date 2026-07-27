@@ -59,6 +59,22 @@ public:
   // zero-latency u-op replay saves the most: byte fetch AND decode.
   void set_l1i_gate(bool g) { l1i_gate_ = g; }
 
+  // mispredict-keyed capture (trace_stall_mispredict): called at a branch-
+  // misprediction flush.  Arms a one-shot tag: if a FRESH stretch begins at
+  // `target` with a u-op-cache miss, it commits under `key` at the next hit
+  // WITHOUT the ROB-drain gate -- recovery stretches starve dispatch without
+  // draining the ROB, so the costly gate would filter out exactly these events.
+  // The in-flight stretch is left alone: the stream is trace-driven (no wrong
+  // path ever enters the buffer), and killing it at every mispredict starves
+  // the steady-state capture path.  If a stretch spans the flush, this arm is
+  // simply consumed without tagging.
+  void arm_event(uint64_t key, uint64_t target)
+  {
+    armed_ = true;
+    armed_key_ = key;
+    armed_target_ = target;
+  }
+
   // an instruction fetch belonging to the fetch stream completed slower than an
   // L1I hit while this stretch was recording (loose attribution, like note_stall)
   void note_l1i_miss()
@@ -72,9 +88,19 @@ public:
   void on_dib(uint64_t ip, bool hit, cpu_stats& stats)
   {
     touched_ = false;
+    touched_event_ = false;
+    if (armed_) {
+      if (!hit && !recording && ip == armed_target_) {
+        event_tag_ = armed_key_; // the restart stretch begins with a miss: tag it
+      }
+      armed_ = false; // one-shot: consumed by the first post-flush DIB check
+    }
     cov.observe(ip, stats.stall_dynamic_uops, stats.stall_dynamic_uops_covered, stats.stall_unique_ips_seen);
     if (hit) {
       if (recording) {
+        if (event_tag_ != 0) {
+          commit_event(stats); // mispredict-keyed: no ROB-drain gate (see arm_event)
+        }
         if (costly && (!l1i_gate_ || l1i_missed_)) {
           commit(stats);
         } else if (costly) {
@@ -116,6 +142,11 @@ public:
   [[nodiscard]] bool touched() const { return touched_; }
   [[nodiscard]] uint64_t touch_entry() const { return touch_entry_; }
   [[nodiscard]] uint64_t touch_cost() const { return touch_cost_; }
+
+  // same hook for a re-captured event-keyed stretch (both can fire in one on_dib)
+  [[nodiscard]] bool touched_event() const { return touched_event_; }
+  [[nodiscard]] uint64_t touch_event_entry() const { return touch_event_entry_; }
+  [[nodiscard]] uint64_t touch_event_cost() const { return touch_event_cost_; }
 
   // end-of-run Pareto analysis: cumulative dynamic weight (occurrences x length)
   // captured by the top-N traces, ranked by occurrence, by dynamic weight, and by
@@ -223,12 +254,54 @@ private:
     pending.erase(pit);
   }
 
+  // commit the in-flight stretch under its mispredict-event key.  Same depth cap,
+  // same occurrence filter, no ROB gate.  Cost floor of one cycle per u-op keeps
+  // event traces competitive under cost-eviction (their stretches rarely trip the
+  // ROB-drain condition, so raw stretch_cost is usually zero).
+  void commit_event(cpu_stats& stats)
+  {
+    if (buf.empty()) {
+      return;
+    }
+    const uint64_t ev_cost = std::max<uint64_t>(stretch_cost, buf.size());
+    if (auto it = start_index.find(event_tag_); it != start_index.end()) {
+      ++traces[it->second].occurrences;
+      traces[it->second].cost += ev_cost;
+      ++stats.stall_event_dedup;
+      touched_event_ = true;
+      touch_event_entry_ = event_tag_;
+      touch_event_cost_ = traces[it->second].cost;
+      return;
+    }
+    auto [pit, inserted] = pending.try_emplace(event_tag_);
+    if (inserted) {
+      ++stats.stall_event_candidates;
+    }
+    pit->second.cost += ev_cost;
+    if (++pit->second.count < threshold_) {
+      return;
+    }
+    trace tr;
+    tr.entry = event_tag_;
+    tr.ips = buf;
+    tr.occurrences = pit->second.count;
+    tr.cost = pit->second.cost;
+    ++stats.stall_event_traces;
+    touched_event_ = true;
+    touch_event_entry_ = event_tag_;
+    touch_event_cost_ = tr.cost;
+    start_index.emplace(event_tag_, traces.size());
+    traces.push_back(std::move(tr));
+    pending.erase(pit);
+  }
+
   void reset()
   {
     recording = false;
     costly = false;
     l1i_missed_ = false;
     stretch_cost = 0;
+    event_tag_ = 0;
     buf.clear();
   }
 
@@ -255,6 +328,13 @@ private:
   bool touched_ = false;     // this on_dib committed or re-captured a stretch
   uint64_t touch_entry_ = 0;
   uint64_t touch_cost_ = 0;
+  bool touched_event_ = false; // this on_dib committed or re-captured an event-keyed stretch
+  uint64_t touch_event_entry_ = 0;
+  uint64_t touch_event_cost_ = 0;
+  bool armed_ = false;         // one-shot mispredict tag pending (arm_event)
+  uint64_t armed_key_ = 0;
+  uint64_t armed_target_ = 0;
+  uint64_t event_tag_ = 0;     // nonzero: in-flight stretch commits under this event key
   uint64_t start_ip = 0;
   uint64_t stretch_cost = 0; // ROB-stall cycles in the in-flight stretch
   std::vector<uint64_t> buf;

@@ -38,6 +38,11 @@ struct cpu_stats {
   uint64_t store_conflict_evictions = 0;  // set-assoc evictions while the store was globally underfull (set skew)
   uint64_t store_occupancy = 0;           // trace-store valid entries at end of phase (level, not subtracted)
   uint64_t stall_traces = 0;              // distinct traces committed (passed the occurrence filter)
+  uint64_t stall_event_traces = 0;        // mispredict-keyed traces committed (trace_stall_mispredict)
+  uint64_t stall_event_candidates = 0;    // distinct mispredict-event keys seen (unfiltered)
+  uint64_t stall_event_dedup = 0;         // re-captures of stored mispredict-keyed traces
+  uint64_t event_probes = 0;              // resolution-time store probes (mispredict flushes)
+  uint64_t event_probe_hits = 0;          // probes that found an event-keyed trace (walk launched)
   uint64_t stall_traces_candidates = 0;   // distinct stretch-start IPs seen (total, before filtering)
   uint64_t stall_dedup = 0;              // costly stretches whose start IP was already captured
   uint64_t stall_gated_l1i = 0;          // costly stretches rejected by the L1I admission gate (no L1I miss observed)

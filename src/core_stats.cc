@@ -20,6 +20,11 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.store_conflict_evictions -= rhs.store_conflict_evictions;
   // store_occupancy is a level, not a counter: keep the end-of-phase value
   lhs.stall_traces -= rhs.stall_traces;
+  lhs.stall_event_traces -= rhs.stall_event_traces;
+  lhs.stall_event_candidates -= rhs.stall_event_candidates;
+  lhs.stall_event_dedup -= rhs.stall_event_dedup;
+  lhs.event_probes -= rhs.event_probes;
+  lhs.event_probe_hits -= rhs.event_probe_hits;
   lhs.stall_traces_candidates -= rhs.stall_traces_candidates;
   lhs.stall_dedup -= rhs.stall_dedup;
   lhs.stall_gated_l1i -= rhs.stall_gated_l1i;

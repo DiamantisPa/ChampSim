@@ -146,6 +146,7 @@ public:
   bool trace_rec_enable{true};  // run the forward recorder   (resolved in ctor)
   bool trace_stg_enable{false};   // run the staging builder    (resolved in ctor)
   bool trace_stall_enable{false}; // run the stall-triggered segmenter (trace_builder "stall"/"all")
+  int stall_mispredict_mode{0}; // trace_stall_mispredict: 0=off, 1=resolution-time probe, 2=predict-time alternate-key probe (capture identical)
 
   // Trace-fill: a bounded trace cache fed by the stager; on the appropriate
   // u-op-cache event install the trace's windows.  Mode set by "trace_fill"
@@ -387,6 +388,7 @@ public:
   bool do_predict_branch(ooo_model_instr& instr);
   void do_check_dib(ooo_model_instr& instr);
   void do_flush_fill(const ooo_model_instr& branch); // FLUSH mode: install recovery-PC trace on a mispredict
+  void do_event_trigger(const ooo_model_instr& branch); // mispredict-keyed probe + capture arm (trace_stall_mispredict)
   void finalize_coverage_stats(); // end-of-phase: derived trace-coverage attribution
   bool do_fetch_instruction(std::deque<ooo_model_instr>::iterator begin, std::deque<ooo_model_instr>::iterator end);
   void do_dib_update(const ooo_model_instr& instr);
@@ -602,6 +604,11 @@ public:
       }
     }
 
+    stall_mispredict_mode = (b.m_trace_stall_mispredict < 0) ? 0 : b.m_trace_stall_mispredict;
+    if (const char* e = std::getenv("PROMETHEUS_STALL_MISPREDICT"); e != nullptr && *e != '\0') {
+      stall_mispredict_mode = std::max(0, std::atoi(e)); // 0=off, 1=resolution probe, 2=predict-time alternate probe
+    }
+
     // UCP port knobs: independent of the trace-fill mode (trace_ucp composes with
     // any fill mode, including off = pure UCP)
     ucp_enable = (b.m_trace_ucp != 0);
@@ -667,7 +674,8 @@ public:
               << " walk_delay=" << alt_walk_delay_cycles << " walk_l1i=" << alt_walk_l1i << " walk_wait=" << alt_walk_wait
               << " wait_cap=" << alt_walk_wait_cap << " issue_cap=" << alt_walk_issue_cap << " decode_cap=" << alt_walk_decode_cap
               << " decode_shared=" << alt_walk_decode_shared << " walk_filter=" << alt_walk_filter << " uop_buffer=" << uop_buffer_windows
-              << " probe_ahead=" << chain_probe_ahead << " head_uops=" << head_uops << " tail_targets=" << tail_targets
+              << " probe_ahead=" << chain_probe_ahead << " mispredict_trigger=" << stall_mispredict_mode
+              << " head_uops=" << head_uops << " tail_targets=" << tail_targets
               << " ucp=" << ucp_enable << " ucp_T=" << ucp_threshold << " ucp_max_ip=" << ucp_max_ip_check << " ucp_step=" << ucp_step
               << " ucp_altind=" << ucp_altind_enable << std::endl;
   }

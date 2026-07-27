@@ -28,6 +28,7 @@ RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\
 RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)(?: l1i-gated (\d+))?', re.M)
 RE_STALL_COV = re.compile(r'trace-stall coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
 RE_STORE = re.compile(r'trace-store: evictions (\d+) conflict-evictions (\d+) occupancy (\d+)', re.M)
+RE_EVENT = re.compile(r'trace-event: probes (\d+) probe-hits (\d+) traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+)', re.M)
 BKT_LABELS = [16, 32, 64, 128, 256, 512, 1024]
 _bkt = ' '.join(fr'{n}=([\d.-]+)%' for n in BKT_LABELS)
 RE_STALL_OCC = re.compile(r'trace-stall top-by-occurrence \(cum% dyn-weight\): ' + _bkt, re.M)
@@ -133,6 +134,10 @@ def parse_file(path):
     sto = RE_STORE.search(txt)
     if sto:
         d['store_evict'], d['store_conflict'], d['store_occ'] = int(sto.group(1)), int(sto.group(2)), int(sto.group(3))
+    ev = RE_EVENT.search(txt)
+    if ev:
+        d['ev_probes'], d['ev_hits'] = int(ev.group(1)), int(ev.group(2))
+        d['ev_traces'], d['ev_cand'], d['ev_dedup'] = int(ev.group(3)), int(ev.group(4)), int(ev.group(5))
 
     def _floats(m):
         out = []
@@ -320,6 +325,13 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
             cf = amean([pct(r['store_conflict'], r['store_evict']) for r in have_store if r['store_evict']])
             print(f"store:             occupancy {amean([r['store_occ'] for r in have_store]):,.0f}   "
                   f"evictions {ev:,.0f} ({cf:.1f}% conflict = while underfull)")
+        have_ev = [r for r in have_stall if r.get('ev_probes', 0) > 0]
+        if have_ev:
+            hitp = amean([pct(r['ev_hits'], r['ev_probes']) for r in have_ev if r['ev_probes']])
+            print(f"mispredict trig:   probes {amean([r['ev_probes'] for r in have_ev]):,.0f}   "
+                  f"walk-hits {amean([r['ev_hits'] for r in have_ev]):,.0f} ({hitp:.1f}%)   "
+                  f"event-traces {amean([r['ev_traces'] for r in have_ev]):,.0f} of {amean([r['ev_cand'] for r in have_ev]):,.0f} "
+                  f"(dedup {amean([r['ev_dedup'] for r in have_ev]):,.0f})")
         cov_have = [r for r in have_stall if 'stall_dyn_tot' in r]
         if cov_have:
             dyn = amean([pct(r['stall_dyn_cov'], r['stall_dyn_tot']) for r in cov_have if r['stall_dyn_tot']])

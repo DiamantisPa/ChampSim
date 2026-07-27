@@ -118,6 +118,10 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.stall_traces_candidates, stats.stall_dedup, stats.stall_stored_uops, stats.stall_gated_l1i));
   lines.push_back(fmt::format("{} trace-store: evictions {} conflict-evictions {} occupancy {}", stats.name, stats.store_evictions,
                               stats.store_conflict_evictions, stats.store_occupancy));
+  if (stats.event_probes > 0 || stats.stall_event_traces > 0) {
+    lines.push_back(fmt::format("{} trace-event: probes {} probe-hits {} traces {} (of {} candidates) dedup-hits {}", stats.name, stats.event_probes,
+                                stats.event_probe_hits, stats.stall_event_traces, stats.stall_event_candidates, stats.stall_event_dedup));
+  }
   lines.push_back(fmt::format("{} trace-stall coverage: unique IPs {}/{} ({}%) dynamic uops {}/{} ({}%)", stats.name, stats.stall_unique_ips_covered,
                               stats.stall_unique_ips_seen,
                               ::print_ratio(100 * static_cast<long long>(stats.stall_unique_ips_covered), static_cast<long long>(stats.stall_unique_ips_seen)),

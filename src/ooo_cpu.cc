@@ -231,6 +231,33 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
       fmt::print("[BRANCH] instr_id: {} ip: {} taken: {}\n", arch_instr.instr_id, arch_instr.ip, arch_instr.branch_taken);
     }
 
+    // mispredict-trigger modes 2/3: predict-time alternate-path probe.  The stored
+    // key is hash(branch, restart) where restart = the path the failed prediction
+    // rejected; the same quantity is computable HERE, before resolution, as the
+    // alternate of the current prediction (fallthrough if predicted taken, BTB
+    // target if predicted not-taken).  A hit means this branch has repeatedly
+    // mispredicted from this direction with a costly recovery -- prefetch that
+    // recovery path now, with fetch-to-resolution lead.  Conditionals only: an
+    // indirect's alternate target is not enumerable at predict time.  Mode 3 adds
+    // the UCP H2P gate (CTR_SC_BIMH, published by tage_sc_l on every prediction):
+    // unfiltered probing fires on every occurrence of a stored branch, so ~the
+    // branch's correct-prediction fraction of walks is pure speculation waste --
+    // measured -0.061pp (mode 2, qualcomm).  Gating on hard-to-predict recovers
+    // the conversion rate, exactly UCP's rationale for its classifier.
+    if ((stall_mispredict_mode == 2 || (stall_mispredict_mode == 3 && ucp::bp_last_h2p)) && !warmup && fill_mode == fill_mode_type::CHAIN
+        && ((arch_instr.branch == BRANCH_CONDITIONAL) || (arch_instr.branch == BRANCH_OTHER))) {
+      const uint64_t bip = arch_instr.ip.to<uint64_t>();
+      const uint64_t alt = arch_instr.branch_prediction ? bip + 4 : ucp_btb_target;
+      if (alt != 0) {
+        const uint64_t key = (bip ^ (alt << 1)) | (uint64_t{1} << 63);
+        ++sim_stats.event_probes;
+        if (const auto* ips = fill_store.lookup_entry(key); ips != nullptr && !ips->empty()) {
+          ++sim_stats.event_probe_hits;
+          do_chain_trigger(*ips);
+        }
+      }
+    }
+
     // call code prefetcher every time the branch predictor is used
     l1i->impl_prefetcher_branch_operate(arch_instr.ip, arch_instr.branch, predicted_branch_target);
 
@@ -1167,8 +1194,10 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     const std::size_t before = stall.get_traces().size();
     stall.on_dib(instr.ip.to<uint64_t>(), hit, sim_stats);
     if (fill_mode != fill_mode_type::OFF) {
-      if (stall.get_traces().size() > before) {
-        const auto& t = stall.get_traces().back();
+      // one on_dib can commit up to two traces (entry-keyed + mispredict-keyed)
+      const std::size_t after = stall.get_traces().size();
+      for (std::size_t ti = before; ti < after; ++ti) {
+        const auto& t = stall.get_traces()[ti];
         if (fill_mode == fill_mode_type::CHAIN) {
           // enforce the metadata format at insert: <= meta_windows window slots,
           // every window delta encodable in 16 bits (else the trace is rejected)
@@ -1186,10 +1215,15 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
         } else {
           fill_store.insert(t.entry, t.ips, t.cost);
         }
-      } else if (stall.touched()) {
-        // re-capture of a stored stretch: refresh its accumulated cost so the
-        // cost-aware eviction policy sees current values
+      }
+      // refresh accumulated costs so cost-aware eviction sees current values
+      // (a no-op with identical value right after a fresh insert; the real work
+      // is the re-capture case, where only the stored cost changes)
+      if (stall.touched()) {
         fill_store.update_cost(stall.touch_entry(), stall.touch_cost());
+      }
+      if (stall.touched_event()) {
+        fill_store.update_cost(stall.touch_event_entry(), stall.touch_event_cost());
       }
     }
   }
@@ -1223,6 +1257,43 @@ void O3_CPU::do_flush_fill(const ooo_model_instr& branch)
     if (installed > 0) {
       ++sim_stats.uop_trace_fill_hits; // here: count of mispredicts served a recovery trace
     }
+  }
+}
+
+// Mispredict-keyed trigger (trace_stall_mispredict): fired at branch-misprediction
+// resolution, when the resolved (branch, restart) pair is architecturally known.
+// Probes the trace store under a hashed event key -- a hit launches a standard
+// chain walk for the recovery path recorded after past occurrences of this exact
+// mispredict, with the full redirect+refetch latency as lead (FTQ probing has ~zero
+// lead here: the queue is empty after the flush).  Then arms the stall segmenter to
+// capture the upcoming restart stretch under the same key (no ROB-drain gate).
+// Bit 63 separates event keys from instruction-PC keys in the shared store.
+void O3_CPU::do_event_trigger(const ooo_model_instr& branch)
+{
+  if (stall_mispredict_mode == 0 || warmup || fill_mode != fill_mode_type::CHAIN) {
+    return;
+  }
+  const uint64_t bip = branch.ip.to<uint64_t>();
+  const uint64_t restart = branch.branch_taken ? branch.branch_target.to<uint64_t>() : bip + 4;
+  if (restart == 0) {
+    return;
+  }
+  const uint64_t key = (bip ^ (restart << 1)) | (uint64_t{1} << 63);
+  if (stall_mispredict_mode == 1) {
+    // mode 1: probe at resolution.  Measured negative (-0.08pp qualcomm): with a
+    // 1-cycle redirect the lead is structurally absent and walk traffic contends
+    // with recovery demand fetch.  Kept for the ablation table.
+    ++sim_stats.event_probes;
+    if (const auto* ips = fill_store.lookup_entry(key); ips != nullptr && !ips->empty()) {
+      ++sim_stats.event_probe_hits;
+      do_chain_trigger(*ips);
+    }
+  }
+  // both modes capture identically: the recovery trace is keyed by the resolved
+  // (branch, restart) pair -- which is exactly hash(branch, alternate-of-the-
+  // failed-prediction), the key mode 2 recomputes at predict time
+  if (trace_stall_enable) {
+    stall.arm_event(key, restart);
   }
 }
 
@@ -1372,9 +1443,10 @@ long O3_CPU::decode_instruction()
         db_entry.branch_mispredicted = 0;
         // pay misprediction penalty
         this->fetch_resume_time = this->current_time + BRANCH_MISPREDICT_PENALTY;
-        this->do_flush_fill(db_entry); // FLUSH mode: warm the recovery path
-        this->in_recovery = true;      // frontend now refilling the recovery path
-        this->chain_probe_cursor = 0;  // CHAIN deep probe: FTQ flush -- lead rebuilds
+        this->do_flush_fill(db_entry);    // FLUSH mode: warm the recovery path
+        this->do_event_trigger(db_entry); // mispredict-keyed probe + capture arm
+        this->in_recovery = true;         // frontend now refilling the recovery path
+        this->chain_probe_cursor = 0;     // CHAIN deep probe: FTQ flush -- lead rebuilds
       }
     }
     // Add to dispatch
@@ -1705,9 +1777,10 @@ void O3_CPU::do_complete_execution(ooo_model_instr& instr)
 
   if (instr.branch_mispredicted) {
     fetch_resume_time = current_time + BRANCH_MISPREDICT_PENALTY;
-    do_flush_fill(instr); // FLUSH mode: warm the recovery path
-    in_recovery = true;   // frontend now refilling the recovery path
-    chain_probe_cursor = 0; // CHAIN deep probe: FTQ flush -- lead rebuilds
+    do_flush_fill(instr);    // FLUSH mode: warm the recovery path
+    do_event_trigger(instr); // mispredict-keyed probe + capture arm
+    in_recovery = true;      // frontend now refilling the recovery path
+    chain_probe_cursor = 0;  // CHAIN deep probe: FTQ flush -- lead rebuilds
   }
 }
 

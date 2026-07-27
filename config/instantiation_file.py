@@ -46,6 +46,7 @@ core_builder_parts = {
     'trace_walk_l1i': '.trace_walk_l1i({trace_walk_l1i})',
     'trace_walk_wait_cap': '.trace_walk_wait_cap({trace_walk_wait_cap})',
     'trace_stall_l1i_gate': '.trace_stall_l1i_gate({trace_stall_l1i_gate})',
+    'trace_stall_mispredict': '.trace_stall_mispredict({trace_stall_mispredict})',
     'trace_store_cost_evict': '.trace_store_cost_evict({trace_store_cost_evict})',
     'trace_head_uops': '.trace_head_uops({trace_head_uops})',
     'trace_tail_targets': '.trace_tail_targets({trace_tail_targets})',
