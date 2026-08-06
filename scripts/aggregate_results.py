@@ -27,8 +27,9 @@ RE_STG = re.compile(r'trace-stg: loop (\d+) function (\d+) dedup-hits (\d+) enta
 RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
 RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)(?: l1i-gated (\d+))?', re.M)
 RE_STALL_COV = re.compile(r'trace-stall coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
-RE_STORE = re.compile(r'trace-store: evictions (\d+) conflict-evictions (\d+) occupancy (\d+)', re.M)
+RE_STORE = re.compile(r'trace-store: evictions (\d+) conflict-evictions (\d+) occupancy (\d+)(?: windows (\d+) shared (\d+))?', re.M)
 RE_EVENT = re.compile(r'trace-event: probes (\d+) probe-hits (\d+) traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+)', re.M)
+RE_MISSCLS = re.compile(r'chain-miss-classes: in-flight (\d+) entry (\d+) mid-trace (\d+)', re.M)
 BKT_LABELS = [16, 32, 64, 128, 256, 512, 1024]
 _bkt = ' '.join(fr'{n}=([\d.-]+)%' for n in BKT_LABELS)
 RE_STALL_OCC = re.compile(r'trace-stall top-by-occurrence \(cum% dyn-weight\): ' + _bkt, re.M)
@@ -134,10 +135,15 @@ def parse_file(path):
     sto = RE_STORE.search(txt)
     if sto:
         d['store_evict'], d['store_conflict'], d['store_occ'] = int(sto.group(1)), int(sto.group(2)), int(sto.group(3))
+        if sto.group(4):
+            d['store_win'], d['store_shared'] = int(sto.group(4)), int(sto.group(5))
     ev = RE_EVENT.search(txt)
     if ev:
         d['ev_probes'], d['ev_hits'] = int(ev.group(1)), int(ev.group(2))
         d['ev_traces'], d['ev_cand'], d['ev_dedup'] = int(ev.group(3)), int(ev.group(4)), int(ev.group(5))
+    mc = RE_MISSCLS.search(txt)
+    if mc:
+        d['mc_inflight'], d['mc_entry'], d['mc_midtrace'] = int(mc.group(1)), int(mc.group(2)), int(mc.group(3))
 
     def _floats(m):
         out = []
@@ -325,6 +331,19 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
             cf = amean([pct(r['store_conflict'], r['store_evict']) for r in have_store if r['store_evict']])
             print(f"store:             occupancy {amean([r['store_occ'] for r in have_store]):,.0f}   "
                   f"evictions {ev:,.0f} ({cf:.1f}% conflict = while underfull)")
+            have_ov = [r for r in have_store if r.get('store_win')]
+            if have_ov:
+                ovp = amean([pct(r['store_shared'], r['store_win']) for r in have_ov if r['store_win']])
+                print(f"fragmentation:     windows inserted {amean([r['store_win'] for r in have_ov]):,.0f}   "
+                      f"already in another trace {amean([r['store_shared'] for r in have_ov]):,.0f} ({ovp:.1f}% overlap)")
+        have_mc = [r for r in have_stall if 'mc_midtrace' in r and r.get('miss_total')]
+        if have_mc:
+            infl = amean([pct(r['mc_inflight'], r['miss_total']) for r in have_mc])
+            ent = amean([pct(r['mc_entry'], r['miss_total']) for r in have_mc])
+            mid = amean([pct(r['mc_midtrace'], r['miss_total']) for r in have_mc])
+            print(f"miss classes:      in-flight {amean([r['mc_inflight'] for r in have_mc]):,.0f} ({infl:.1f}%)   "
+                  f"entry {amean([r['mc_entry'] for r in have_mc]):,.0f} ({ent:.1f}%)   "
+                  f"MID-TRACE {amean([r['mc_midtrace'] for r in have_mc]):,.0f} ({mid:.1f}%)   [% of all muop misses]")
         have_ev = [r for r in have_stall if r.get('ev_probes', 0) > 0]
         if have_ev:
             hitp = amean([pct(r['ev_hits'], r['ev_probes']) for r in have_ev if r['ev_probes']])

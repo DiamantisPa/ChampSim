@@ -116,8 +116,12 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
 
   lines.push_back(fmt::format("{} trace-stall: traces {} (of {} candidates) dedup-hits {} stored-uops {} l1i-gated {}", stats.name, stats.stall_traces,
                               stats.stall_traces_candidates, stats.stall_dedup, stats.stall_stored_uops, stats.stall_gated_l1i));
-  lines.push_back(fmt::format("{} trace-store: evictions {} conflict-evictions {} occupancy {}", stats.name, stats.store_evictions,
-                              stats.store_conflict_evictions, stats.store_occupancy));
+  lines.push_back(fmt::format("{} trace-store: evictions {} conflict-evictions {} occupancy {} windows {} shared {}", stats.name, stats.store_evictions,
+                              stats.store_conflict_evictions, stats.store_occupancy, stats.store_win_added, stats.store_win_shared));
+  if (stats.chain_miss_inflight > 0 || stats.chain_miss_entry > 0 || stats.chain_miss_midtrace > 0) {
+    lines.push_back(fmt::format("{} chain-miss-classes: in-flight {} entry {} mid-trace {}", stats.name, stats.chain_miss_inflight,
+                                stats.chain_miss_entry, stats.chain_miss_midtrace));
+  }
   if (stats.event_probes > 0 || stats.stall_event_traces > 0) {
     lines.push_back(fmt::format("{} trace-event: probes {} probe-hits {} traces {} (of {} candidates) dedup-hits {}", stats.name, stats.event_probes,
                                 stats.event_probe_hits, stats.stall_event_traces, stats.stall_event_candidates, stats.stall_event_dedup));

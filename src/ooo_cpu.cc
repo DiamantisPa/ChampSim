@@ -59,6 +59,8 @@ long O3_CPU::operate()
   sim_stats.store_evictions = fill_store.evictions();
   sim_stats.store_conflict_evictions = fill_store.conflict_evictions();
   sim_stats.store_occupancy = fill_store.size();
+  sim_stats.store_win_added = fill_store.windows_added();
+  sim_stats.store_win_shared = fill_store.windows_shared();
 
   return progress;
 }
@@ -834,6 +836,25 @@ void O3_CPU::uop_buffer_push(const std::vector<uint64_t>& window_ips, champsim::
 
 // wait-eligible variant: the walk holding the window, or nullptr -- background
 // walks (wait-cap expired: their bytes proved far) are not waited on.
+// Wait-mode-2 gate: only worth stalling fetch if the pending window's leading
+// line has already arrived (install is imminent -- a couple of cycles for the
+// install slot).  Stalling on bytes still in flight measured slower than letting
+// the warm, pipelined slow path absorb the miss (wait=1: -34% misses, -0.18% IPC).
+// Optimistic about preceding windows' install order; the wait cap bounds the error.
+bool O3_CPU::walk_wait_worthwhile(const alt_walk* holder, uint64_t rawip) const
+{
+  if (alt_walk_wait_mode != 2 || !alt_walk_l1i) {
+    return true; // mode 1 (or byte-free walks): always wait, legacy behavior
+  }
+  const uint64_t wtag = rawip >> dib_window_bits;
+  for (std::size_t i = holder->idx; i < holder->windows.size(); ++i) {
+    if ((holder->windows[i].front() >> dib_window_bits) == wtag) {
+      return holder->lines_ready.count(champsim::block_number{champsim::address{holder->windows[i].front()}}.to<uint64_t>()) != 0;
+    }
+  }
+  return false;
+}
+
 O3_CPU::alt_walk* O3_CPU::alt_pending_walk(uint64_t rawip)
 {
   const uint64_t wtag = rawip >> dib_window_bits;
@@ -1014,8 +1035,8 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     // is demoted to a background prefetcher -- no instruction waits on it again,
     // demand proceeds through build mode (its fetch MSHR-merges with the walk's
     // line requests) while the walk keeps installing ahead.  Cap 0 = unbounded.
-    if (alt_walk_wait) {
-      if (alt_walk* holder = alt_pending_walk(instr.ip.to<uint64_t>()); holder != nullptr) {
+    if (alt_walk_wait_mode != 0) {
+      if (alt_walk* holder = alt_pending_walk(instr.ip.to<uint64_t>()); holder != nullptr && walk_wait_worthwhile(holder, instr.ip.to<uint64_t>())) {
         if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
           ++instr.dib_wait_cycles;
           ++sim_stats.alt_wait_cycles;
@@ -1051,8 +1072,8 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
         do_head_trigger(*ips, idx); // tail-region miss: walk from here
       }
     }
-    if (!hit && alt_walk_wait) {
-      if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr) {
+    if (!hit && alt_walk_wait_mode != 0) {
+      if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr && walk_wait_worthwhile(holder, rawip)) {
         if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
           ++instr.dib_wait_cycles;
           ++sim_stats.alt_wait_cycles;
@@ -1079,8 +1100,8 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
       ++sim_stats.chain_slack[bucket];
       DIB.install(bit->ips, /*prefetch=*/false); // promote: demand-class fill at MRU
       uop_buffer.erase(bit);
-    } else if (alt_walk_wait) {
-      if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr) {
+    } else if (alt_walk_wait_mode != 0) {
+      if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr && walk_wait_worthwhile(holder, rawip)) {
         if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
           ++instr.dib_wait_cycles;
           ++sim_stats.alt_wait_cycles;
@@ -1163,6 +1184,20 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
     // (With alt_walk_wait on, these become alt_wait_cycles instead and this stays ~0.)
     if (fill_mode == fill_mode_type::ALT && alt_window_pending(rawip)) {
       ++sim_stats.alt_late_misses;
+    }
+    // CHAIN shadow classification of each miss against the CURRENT store contents
+    // (not builder coverage): was a walk already in flight (timeliness loss), is
+    // the miss IP itself a stored trace ENTRY (front-door existed), or does it
+    // fall mid-trace in a stored window (side-door: the trigger gap that window-
+    // index probing would convert)?  Measurement only -- no behavior change.
+    if (fill_mode == fill_mode_type::CHAIN) {
+      if (alt_window_pending(rawip)) {
+        ++sim_stats.chain_miss_inflight;
+      } else if (fill_store.peek_entry(rawip)) {
+        ++sim_stats.chain_miss_entry;
+      } else if (fill_store.peek_window(rawip)) {
+        ++sim_stats.chain_miss_midtrace;
+      }
     }
     const bool traced = (trace_stg_enable && stager.covers(rawip)) || (trace_stall_enable && stall.covers(rawip));
     if (in_recovery) {

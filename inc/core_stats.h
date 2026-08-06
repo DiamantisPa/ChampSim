@@ -34,9 +34,14 @@ struct cpu_stats {
 
   // stall-triggered segmenter (see inc/trace_stall.h): traces recorded across a
   // build-mode stretch that drained the ROB (a costly backend-idle stall).
+  uint64_t chain_miss_inflight = 0;       // chain misses with the window's walk already in flight (late)
+  uint64_t chain_miss_entry = 0;          // chain misses whose IP is a stored trace ENTRY (front door existed)
+  uint64_t chain_miss_midtrace = 0;       // chain misses falling mid-trace in a stored window (trigger gap)
   uint64_t store_evictions = 0;           // trace-store evictions (any geometry)
   uint64_t store_conflict_evictions = 0;  // set-assoc evictions while the store was globally underfull (set skew)
   uint64_t store_occupancy = 0;           // trace-store valid entries at end of phase (level, not subtracted)
+  uint64_t store_win_added = 0;           // distinct windows inserted with new traces
+  uint64_t store_win_shared = 0;          // of those, already covered by another resident trace (fragmentation)
   uint64_t stall_traces = 0;              // distinct traces committed (passed the occurrence filter)
   uint64_t stall_event_traces = 0;        // mispredict-keyed traces committed (trace_stall_mispredict)
   uint64_t stall_event_candidates = 0;    // distinct mispredict-event keys seen (unfiltered)

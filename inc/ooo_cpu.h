@@ -189,7 +189,9 @@ public:
   std::size_t alt_walk_max = 2;
   int alt_walk_delay_cycles = 5;
   int alt_walk_width = 1;      // windows installed per walk per cycle (pre-decode width)
-  bool alt_walk_wait = false;  // miss on a walk-pending window stalls fetch (hit-under-fill) instead of switching to build
+  int alt_walk_wait_mode = 0;  // walk-pending miss policy: 0=miss through, 1=always wait (hit-under-fill),
+                               // 2=wait ONLY if the window's line already arrived (install imminent; stalling
+                               // on in-flight bytes measured slower than the pipelined slow path)
   bool alt_walk_l1i = false;   // walk fetches its bytes through the real L1I (install gated on line arrival)
   int alt_walk_wait_cap = 16;  // max cycles an instruction waits on a pending window before falling to build (0 = unbounded)
   // HEAD fill mode: trace = instantly-servable head (first head_uops uops stored
@@ -345,6 +347,19 @@ public:
   // branch
   champsim::chrono::clock::time_point fetch_resume_time{};
 
+  // instruction-supply lookahead (FTQ model): json ftq_depth > 0 overrides the
+  // legacy 2 x fetch_width; env PROMETHEUS_FTQ_DEPTH overrides both.  This is
+  // the decoupled-BPU runahead depth -- probes (trace_probe_ahead) are clamped
+  // by it, and it is truncated at every mispredict (cursor reset), so direction
+  // is oracle only within the inter-mispredict window.
+  static long resolve_ftq_depth(int json_depth, long legacy)
+  {
+    int d = json_depth;
+    if (const char* e = std::getenv("PROMETHEUS_FTQ_DEPTH"); e != nullptr && *e != '\0') {
+      d = std::atoi(e);
+    }
+    return (d > 0) ? d : legacy;
+  }
   const long IN_QUEUE_SIZE;
   std::deque<ooo_model_instr> input_queue;
 
@@ -366,6 +381,7 @@ public:
   [[nodiscard]] std::vector<uint64_t> chain_encode(const std::vector<uint64_t>& ips, bool& truncated, bool& encodable) const;
   [[nodiscard]] bool alt_window_pending(uint64_t rawip) const;
   [[nodiscard]] alt_walk* alt_pending_walk(uint64_t rawip); // like alt_window_pending, but skips background walks
+  [[nodiscard]] bool walk_wait_worthwhile(const alt_walk* holder, uint64_t rawip) const; // wait-mode-2 gate: line already arrived?
   [[nodiscard]] bool walk_issue_available(); // under the issue cap this cycle?
   void walk_issue_note();                    // consume one issue slot (on successful issue)
   [[nodiscard]] bool walk_decode_available(); // may a walk install a window this cycle?
@@ -471,7 +487,7 @@ public:
         BRANCH_MISPREDICT_PENALTY(b.m_mispredict_penalty * b.m_clock_period), DISPATCH_LATENCY(b.m_dispatch_latency * b.m_clock_period),
         DECODE_LATENCY(b.m_decode_latency * b.m_clock_period), SCHEDULING_LATENCY(b.m_schedule_latency * b.m_clock_period),
         EXEC_LATENCY(b.m_execute_latency * b.m_clock_period), DIB_HIT_LATENCY(b.m_dib_hit_latency * b.m_clock_period), L1I_BANDWIDTH(b.m_l1i_bw),
-        L1D_BANDWIDTH(b.m_l1d_bw), IN_QUEUE_SIZE(2 * champsim::to_underlying(b.m_fetch_width)), L1I_bus(b.m_cpu, b.m_fetch_queues),
+        L1D_BANDWIDTH(b.m_l1d_bw), IN_QUEUE_SIZE(resolve_ftq_depth(b.m_ftq_depth, 2 * champsim::to_underlying(b.m_fetch_width))), L1I_bus(b.m_cpu, b.m_fetch_queues),
         L1D_bus(b.m_cpu, b.m_data_queues), l1i(b.m_l1i), branch_module_pimpl(std::make_unique<branch_module_model<Bs...>>(this)),
         btb_module_pimpl(std::make_unique<btb_module_model<Ts...>>(this))
   {
@@ -510,8 +526,11 @@ public:
       if (!trace_stall_enable && !trace_stg_enable) {
         trace_stg_enable = true;
       }
+      // CHAIN keeps the window index in SHADOW mode: maintained for the miss-
+      // classification instrumentation (mid-trace trigger-gap sizing) but never
+      // consulted by chain's probe or fill decisions.
       const bool window_indexed = (fill_mode == fill_mode_type::WINDOW || fill_mode == fill_mode_type::FLUSH || fill_mode == fill_mode_type::PARALLEL
-                                   || fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD);
+                                   || fill_mode == fill_mode_type::ALT || fill_mode == fill_mode_type::HEAD || fill_mode == fill_mode_type::CHAIN);
       fill_store.configure(static_cast<unsigned>(champsim::lg2(b.m_dib_window)), window_indexed);
       dib_window_bits = static_cast<unsigned>(champsim::lg2(b.m_dib_window));
       // capacity/walk knobs: JSON value, overridden by env (env > JSON > default)
@@ -551,9 +570,9 @@ public:
       if (const char* e = std::getenv("PROMETHEUS_WALK_WIDTH"); e != nullptr && *e != '\0') {
         alt_walk_width = std::max(1, std::atoi(e)); // windows installed per walk per cycle
       }
-      alt_walk_wait = (b.m_trace_walk_wait != 0);
+      alt_walk_wait_mode = (b.m_trace_walk_wait < 0) ? 0 : b.m_trace_walk_wait;
       if (const char* e = std::getenv("PROMETHEUS_WALK_WAIT"); e != nullptr && *e != '\0') {
-        alt_walk_wait = (std::atoi(e) != 0); // stall fetch on walk-pending misses
+        alt_walk_wait_mode = std::max(0, std::atoi(e)); // 0=off, 1=always wait, 2=line-ready-gated
       }
       alt_walk_l1i = (b.m_trace_walk_l1i != 0);
       if (const char* e = std::getenv("PROMETHEUS_WALK_L1I"); e != nullptr && *e != '\0') {
@@ -671,10 +690,10 @@ public:
               << " cost_evict=" << fill_store.cost_policy() << " cost_decay=" << fill_store.cost_decay() << " cost_bits=" << fill_store.cost_bits()
               << " walk_max=" << alt_walk_max
               << " walk_width=" << alt_walk_width
-              << " walk_delay=" << alt_walk_delay_cycles << " walk_l1i=" << alt_walk_l1i << " walk_wait=" << alt_walk_wait
+              << " walk_delay=" << alt_walk_delay_cycles << " walk_l1i=" << alt_walk_l1i << " walk_wait=" << alt_walk_wait_mode
               << " wait_cap=" << alt_walk_wait_cap << " issue_cap=" << alt_walk_issue_cap << " decode_cap=" << alt_walk_decode_cap
               << " decode_shared=" << alt_walk_decode_shared << " walk_filter=" << alt_walk_filter << " uop_buffer=" << uop_buffer_windows
-              << " probe_ahead=" << chain_probe_ahead << " mispredict_trigger=" << stall_mispredict_mode
+              << " probe_ahead=" << chain_probe_ahead << " ftq_depth=" << IN_QUEUE_SIZE << " mispredict_trigger=" << stall_mispredict_mode
               << " head_uops=" << head_uops << " tail_targets=" << tail_targets
               << " ucp=" << ucp_enable << " ucp_T=" << ucp_threshold << " ucp_max_ip=" << ucp_max_ip_check << " ucp_step=" << ucp_step
               << " ucp_altind=" << ucp_altind_enable << std::endl;

@@ -61,6 +61,7 @@ struct core_builder_base {
   int m_trace_walk_wait_cap{16};       // alt fill: max cycles an instruction waits on a pending window (0 = unbounded)
   int m_trace_stall_l1i_gate{0};       // stall segmenter: 1 = only commit stretches that also missed L1I
   int m_trace_stall_mispredict{0};     // stall segmenter: 1 = mispredict-keyed capture + resolution-time probe
+  int m_ftq_depth{0};                  // instruction-supply lookahead depth (FTQ model); 0 = legacy 2 x fetch_width
   int m_trace_store_cost_evict{0};     // trace store: 1 = evict minimum-stall-cost trace instead of LRU
   int m_trace_head_uops{8};            // head fill: uops stored per trace head (served instantly)
   int m_trace_tail_targets{3};         // head fill: taken targets in the tail manifest (<0 = unlimited)
@@ -201,6 +202,7 @@ public:
   self_type& trace_store_cost_decay(int trace_store_cost_decay_);
   self_type& trace_store_cost_bits(int trace_store_cost_bits_);
   self_type& trace_stall_mispredict(int trace_stall_mispredict_);
+  self_type& ftq_depth(int ftq_depth_);
 
   /**
    * ALT fill mode: walk latency in cycles from trigger to the first window
@@ -636,6 +638,13 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_stall_mispredict(int trace_stall_mispredict_) -> self_type&
 {
   m_trace_stall_mispredict = trace_stall_mispredict_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::ftq_depth(int ftq_depth_) -> self_type&
+{
+  m_ftq_depth = ftq_depth_;
   return *this;
 }
 

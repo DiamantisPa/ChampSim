@@ -16,8 +16,13 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.uop_miss_recovery -= rhs.uop_miss_recovery;
   lhs.uop_miss_steady_traced -= rhs.uop_miss_steady_traced;
   lhs.uop_miss_recovery_traced -= rhs.uop_miss_recovery_traced;
+  lhs.chain_miss_inflight -= rhs.chain_miss_inflight;
+  lhs.chain_miss_entry -= rhs.chain_miss_entry;
+  lhs.chain_miss_midtrace -= rhs.chain_miss_midtrace;
   lhs.store_evictions -= rhs.store_evictions;
   lhs.store_conflict_evictions -= rhs.store_conflict_evictions;
+  lhs.store_win_added -= rhs.store_win_added;
+  lhs.store_win_shared -= rhs.store_win_shared;
   // store_occupancy is a level, not a counter: keep the end-of-phase value
   lhs.stall_traces -= rhs.stall_traces;
   lhs.stall_event_traces -= rhs.stall_event_traces;

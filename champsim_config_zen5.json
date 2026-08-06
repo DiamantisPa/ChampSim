@@ -29,6 +29,7 @@
       "execute_latency": 0,
       "branch_predictor": "tage_sc_l",
       "btb": "basic_btb",
+      "ftq_depth": 128,
       "trace_builder": "stall",
       "trace_fill": "chain",
       "trace_stall_mispredict": 0,
@@ -43,7 +44,7 @@
       "trace_walk_max": 32,
       "trace_walk_issue_cap": 1,
       "trace_walk_decode_cap": 1,
-      "trace_walk_decode_shared": 0,
+      "trace_walk_decode_shared": 1,
       "trace_walk_width": 1,
       "trace_walk_wait": 0,
       "trace_walk_l1i": 1,
@@ -54,7 +55,7 @@
       "trace_store_cost_bits": 4,
       "trace_head_uops": 8,
       "trace_tail_targets": 3,
-      "trace_uop_buffer": 16,
+      "trace_uop_buffer": 32,
       "trace_probe_ahead": 128,
       "trace_walk_filter": 1,
       "trace_ucp": 0,
@@ -84,7 +85,7 @@
     "prefetch_as_load": false,
     "virtual_prefetch": true,
     "prefetch_activate": "LOAD,PREFETCH",
-    "prefetcher": "no"
+    "prefetcher": "ep4ke"
   },
   "L1D": {
     "sets": 64,
@@ -118,7 +119,7 @@
   },
   "ITLB": {
     "sets": 1,
-    "ways": 64,
+    "ways": 128,
     "rq_size": 16,
     "wq_size": 16,
     "pq_size": 0,

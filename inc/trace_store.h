@@ -64,6 +64,12 @@ public:
   [[nodiscard]] bool cost_policy() const { return cost_evict; }
   [[nodiscard]] uint64_t evictions() const { return n_evict; }
   [[nodiscard]] uint64_t conflict_evictions() const { return n_conflict_evict; }
+
+  // path-fragmentation diagnostic: of the distinct windows inserted with NEW
+  // traces, how many were already covered by a DIFFERENT resident trace?  High
+  // sharing = the same code regions captured repeatedly under different paths.
+  [[nodiscard]] uint64_t windows_added() const { return n_win_added; }
+  [[nodiscard]] uint64_t windows_shared() const { return n_win_shared; }
   [[nodiscard]] bool hash_mode() const { return xor_hash; }
 
   // set-index hash: false = plain modulo (legacy first-cut), true = xor-fold
@@ -153,6 +159,7 @@ public:
     }
     entry_index.emplace(entry, slot);
     if (window_indexed) {
+      count_overlap(slot); // BEFORE add_windows claims these windows for this trace
       add_windows(slot);
     }
   }
@@ -175,6 +182,11 @@ public:
     entries[it->second].lru = ++tick;
     return &entries[it->second].ips;
   }
+
+  // measurement-only peeks: no LRU update, no side effects.  Used by the chain
+  // miss-classification shadow instrumentation (mid-trace trigger-gap sizing).
+  [[nodiscard]] bool peek_entry(uint64_t ip) const { return entry_index.count(ip) != 0; }
+  [[nodiscard]] bool peek_window(uint64_t ip) const { return window_indexed && window_index.count(ip >> window_bits) != 0; }
 
   // lookup by the window containing ip (used by "window" fill mode)
   const std::vector<uint64_t>* lookup_window(uint64_t ip)
@@ -256,6 +268,26 @@ private:
     }
   }
 
+  // fragmentation diagnostic (new inserts only): count this trace's distinct
+  // windows and how many already belong to another resident trace
+  void count_overlap(std::size_t slot)
+  {
+    uint64_t last = 0;
+    bool have = false;
+    for (uint64_t ip : entries[slot].ips) {
+      const uint64_t w = ip >> window_bits;
+      if (have && w == last) {
+        continue;
+      }
+      have = true;
+      last = w;
+      ++n_win_added;
+      if (window_index.count(w) != 0) {
+        ++n_win_shared;
+      }
+    }
+  }
+
   void remove_windows(std::size_t slot)
   {
     for (uint64_t w : entries[slot].windows) {
@@ -282,6 +314,8 @@ private:
   uint64_t tick = 0;
   uint64_t n_evict = 0;          // total evictions (any mode)
   uint64_t n_conflict_evict = 0; // set-assoc evictions while the store was globally underfull (set skew)
+  uint64_t n_win_added = 0;      // distinct windows inserted with new traces
+  uint64_t n_win_shared = 0;     // of those, already covered by a different resident trace (fragmentation)
   std::vector<ent> entries;
   std::unordered_map<uint64_t, std::size_t> entry_index;
   std::unordered_map<uint64_t, std::size_t> window_index;
