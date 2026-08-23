@@ -244,6 +244,10 @@ public:
   int ucp_step = 4;          // instruction stride on the alt path (ARM traces: 4B)
   class TAGE_PREDICTOR_8KB* ucp_altbp = nullptr; // dedicated Alt-BP, allocated on first branch
   bool ucp_altind_enable = false;      // 12.95KB flavor: 4KB Alt-ITTAGE walks through indirect branches
+  int ucp_btb_banks = 0;               // trace_ucp_btb_banks: >0 = model N BTB banks; 0 = ideal (artifact IDEAL_BTB_BANKING)
+  bool trace_warmup_train = false;     // trace_warmup_train: chain/UCP train during warmup (artifact parity); default cold-start at ROI
+  uint64_t ucp_demand_bank_mask = 0;   // BTB banks touched by demand predictions this cycle
+  champsim::chrono::clock::time_point ucp_bank_mask_stamp{}; // cycle the mask belongs to
   // global walk line-issue port model: at most this many walk line reads may enter
   // the L1I per cycle, ACROSS all walks and trigger-time bursts (UCP's paper budgets
   // 1 prefetch/cycle).  0 = legacy schema (per-walk 1/cycle, unlimited aggregate).
@@ -384,6 +388,8 @@ public:
   [[nodiscard]] bool walk_wait_worthwhile(const alt_walk* holder, uint64_t rawip) const; // wait-mode-2 gate: line already arrived?
   [[nodiscard]] bool walk_issue_available(); // under the issue cap this cycle?
   void walk_issue_note();                    // consume one issue slot (on successful issue)
+  void ucp_note_demand_bank(uint64_t ip);          // demand prediction occupies its BTB bank this cycle
+  [[nodiscard]] bool ucp_bank_conflict(uint64_t ip); // is this IP's BTB bank held by demand this cycle?
   [[nodiscard]] bool walk_decode_available(); // may a walk install a window this cycle?
   void walk_decode_note();                    // consume one install slot
   void do_ucp_branch(const ooo_model_instr& arch_instr, uint64_t btb_target, bool always_taken, bool h2p);
@@ -650,6 +656,18 @@ public:
     if (const char* e = std::getenv("PROMETHEUS_UCP_ALTIND"); e != nullptr && *e != '\0') {
       ucp_altind_enable = (std::atoi(e) != 0); // 4KB Alt-ITTAGE (12.95KB flavor)
     }
+    ucp_btb_banks = (b.m_trace_ucp_btb_banks < 0) ? 0 : b.m_trace_ucp_btb_banks;
+    if (const char* e = std::getenv("PROMETHEUS_UCP_BTB_BANKS"); e != nullptr && *e != '\0') {
+      ucp_btb_banks = std::max(0, std::atoi(e)); // model N BTB banks (0 = ideal)
+    }
+    ucp_btb_banks = std::min(ucp_btb_banks, 64); // bank mask is one uint64_t
+    while (ucp_btb_banks & (ucp_btb_banks - 1)) {
+      ucp_btb_banks &= ucp_btb_banks - 1; // round down to a power of two (bank index is a bit-select)
+    }
+    trace_warmup_train = (b.m_trace_warmup_train != 0);
+    if (const char* e = std::getenv("PROMETHEUS_WARMUP_TRAIN"); e != nullptr && *e != '\0') {
+      trace_warmup_train = (std::atoi(e) != 0); // mechanisms train during warmup (UCP_ISCA24 artifact behavior)
+    }
     alt_walk_issue_cap = (b.m_trace_walk_issue_cap < 0) ? 0 : b.m_trace_walk_issue_cap;
     if (const char* e = std::getenv("PROMETHEUS_WALK_ISSUE_CAP"); e != nullptr && *e != '\0') {
       alt_walk_issue_cap = std::max(0, std::atoi(e)); // global walk line-issues per cycle (0 = unlimited)
@@ -696,7 +714,8 @@ public:
               << " probe_ahead=" << chain_probe_ahead << " ftq_depth=" << IN_QUEUE_SIZE << " mispredict_trigger=" << stall_mispredict_mode
               << " head_uops=" << head_uops << " tail_targets=" << tail_targets
               << " ucp=" << ucp_enable << " ucp_T=" << ucp_threshold << " ucp_max_ip=" << ucp_max_ip_check << " ucp_step=" << ucp_step
-              << " ucp_altind=" << ucp_altind_enable << std::endl;
+              << " ucp_altind=" << ucp_altind_enable << " ucp_btb_banks=" << ucp_btb_banks
+              << " warmup_train=" << trace_warmup_train << std::endl;
   }
 };
 

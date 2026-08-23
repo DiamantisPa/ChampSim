@@ -43,6 +43,7 @@ struct cpu_stats {
   uint64_t store_win_added = 0;           // distinct windows inserted with new traces
   uint64_t store_win_shared = 0;          // of those, already covered by another resident trace (fragmentation)
   uint64_t stall_traces = 0;              // distinct traces committed (passed the occurrence filter)
+  uint64_t stall_marks_dropped = 0;       // tight-stall cycles whose costly-mark found no open stretch (close-to-drain race)
   uint64_t stall_event_traces = 0;        // mispredict-keyed traces committed (trace_stall_mispredict)
   uint64_t stall_event_candidates = 0;    // distinct mispredict-event keys seen (unfiltered)
   uint64_t stall_event_dedup = 0;         // re-captures of stored mispredict-keyed traces
@@ -106,6 +107,7 @@ struct cpu_stats {
   uint64_t ucp_stop_btbmiss = 0;       // walks ended by a predicted-taken branch with no BTB target
   uint64_t ucp_stop_maxip = 0;         // walks ended by the straight-line run limit
   uint64_t ucp_ind_walked = 0;         // indirect branches walked through on a predicted target (Alt-Ind flavor)
+  uint64_t ucp_bank_conflicts = 0;     // walk installs stalled by BTB bank conflicts (trace_ucp_btb_banks)
   uint64_t fe_stall_steady = 0;    // build-mode dispatch-starvation cycles, correct path (upper bound)
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)

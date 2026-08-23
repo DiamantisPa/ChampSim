@@ -114,8 +114,9 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.stg_dynamic_uops_covered, stats.stg_dynamic_uops,
                               ::print_ratio(100 * static_cast<long long>(stats.stg_dynamic_uops_covered), static_cast<long long>(stats.stg_dynamic_uops))));
 
-  lines.push_back(fmt::format("{} trace-stall: traces {} (of {} candidates) dedup-hits {} stored-uops {} l1i-gated {}", stats.name, stats.stall_traces,
-                              stats.stall_traces_candidates, stats.stall_dedup, stats.stall_stored_uops, stats.stall_gated_l1i));
+  lines.push_back(fmt::format("{} trace-stall: traces {} (of {} candidates) dedup-hits {} stored-uops {} l1i-gated {} marks-dropped {}", stats.name,
+                              stats.stall_traces, stats.stall_traces_candidates, stats.stall_dedup, stats.stall_stored_uops, stats.stall_gated_l1i,
+                              stats.stall_marks_dropped));
   lines.push_back(fmt::format("{} trace-store: evictions {} conflict-evictions {} occupancy {} windows {} shared {}", stats.name, stats.store_evictions,
                               stats.store_conflict_evictions, stats.store_occupancy, stats.store_win_added, stats.store_win_shared));
   if (stats.chain_miss_inflight > 0 || stats.chain_miss_entry > 0 || stats.chain_miss_midtrace > 0) {
@@ -176,9 +177,10 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
                               stats.chain_filtered_windows, stats.chain_slack[0], stats.chain_slack[1], stats.chain_slack[2], stats.chain_slack[3],
                               stats.chain_slack[4], stats.chain_slack[5]));
   if (stats.ucp_cond_seen > 0) {
-    lines.push_back(fmt::format("{} trace-ucp: cond {} cond-misses {} h2p-marked {} h2p-marked-misses {} paths {} stops(sat/ind/btbmiss/maxip): {} {} {} {} ind-walked {}",
+    lines.push_back(fmt::format("{} trace-ucp: cond {} cond-misses {} h2p-marked {} h2p-marked-misses {} paths {} stops(sat/ind/btbmiss/maxip): {} {} {} {} ind-walked {} bank-conflicts {}",
                                 stats.name, stats.ucp_cond_seen, stats.ucp_cond_misses, stats.ucp_h2p_marked, stats.ucp_h2p_marked_misses, stats.ucp_paths,
-                                stats.ucp_stop_sat, stats.ucp_stop_ind, stats.ucp_stop_btbmiss, stats.ucp_stop_maxip, stats.ucp_ind_walked));
+                                stats.ucp_stop_sat, stats.ucp_stop_ind, stats.ucp_stop_btbmiss, stats.ucp_stop_maxip, stats.ucp_ind_walked,
+                                stats.ucp_bank_conflicts));
   }
 
   lines.push_back(fmt::format("{} trace-seg loss(dyn): covered-final {} latency {} | no-trigger {} overflow {} bad-layout {} short {}", stats.name,

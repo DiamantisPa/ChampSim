@@ -153,10 +153,13 @@ void O3_CPU::initialize_instruction()
     instrs_to_read_this_cycle.consume();
 
     stop_fetch = do_init_instruction(input_queue.front());
+    if (ucp_enable && ucp_btb_banks > 0) {
+      ucp_note_demand_bank(input_queue.front().ip.to<uint64_t>()); // demand prediction holds its BTB bank this cycle
+    }
 
     // CHAIN trace-fill, no deep probe (probe_ahead == 0), or an instruction the
     // deep cursor has not reached yet (post-mispredict rebuild): probe at enqueue.
-    if (fill_mode == fill_mode_type::CHAIN && !warmup && chain_probe_cursor == 0) {
+    if (fill_mode == fill_mode_type::CHAIN && (!warmup || trace_warmup_train) && chain_probe_cursor == 0) {
       if (const auto* ips = fill_store.lookup_entry(input_queue.front().ip.to<uint64_t>()); ips != nullptr && !ips->empty()) {
         do_chain_trigger(*ips);
       }
@@ -178,7 +181,7 @@ void O3_CPU::initialize_instruction()
   // FTQ-tail probe has over the fetch-point u-op-cache lookup.  The cursor is
   // reset on branch mispredictions (= FTQ flush), so recovery lead rebuilds at
   // probe bandwidth, honestly.
-  if (fill_mode == fill_mode_type::CHAIN && !warmup && chain_probe_ahead > 0) {
+  if (fill_mode == fill_mode_type::CHAIN && (!warmup || trace_warmup_train) && chain_probe_ahead > 0) {
     const std::size_t limit = std::min(std::size(input_queue), static_cast<std::size_t>(chain_probe_ahead));
     for (champsim::bandwidth probe_bw{FETCH_WIDTH}; probe_bw.has_remaining() && chain_probe_cursor < limit; probe_bw.consume()) {
       if (const auto* ips = fill_store.lookup_entry(input_queue[chain_probe_cursor].ip.to<uint64_t>()); ips != nullptr && !ips->empty()) {
@@ -246,7 +249,7 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
     // branch's correct-prediction fraction of walks is pure speculation waste --
     // measured -0.061pp (mode 2, qualcomm).  Gating on hard-to-predict recovers
     // the conversion rate, exactly UCP's rationale for its classifier.
-    if ((stall_mispredict_mode == 2 || (stall_mispredict_mode == 3 && ucp::bp_last_h2p)) && !warmup && fill_mode == fill_mode_type::CHAIN
+    if ((stall_mispredict_mode == 2 || (stall_mispredict_mode == 3 && ucp::bp_last_h2p)) && (!warmup || trace_warmup_train) && fill_mode == fill_mode_type::CHAIN
         && ((arch_instr.branch == BRANCH_CONDITIONAL) || (arch_instr.branch == BRANCH_OTHER))) {
       const uint64_t bip = arch_instr.ip.to<uint64_t>();
       const uint64_t alt = arch_instr.branch_prediction ? bip + 4 : ucp_btb_target;
@@ -279,7 +282,7 @@ bool O3_CPU::do_predict_branch(ooo_model_instr& arch_instr)
 
     // UCP: classify/trigger BEFORE the predictor and BTB update (artifact order --
     // the walk must see pre-update state); Alt-BP training happens inside
-    if (ucp_enable && !warmup) {
+    if (ucp_enable && (!warmup || trace_warmup_train)) {
       do_ucp_branch(arch_instr, ucp_btb_target, always_taken, ucp_h2p_now);
     }
 
@@ -371,6 +374,36 @@ void O3_CPU::walk_decode_note()
   }
 }
 
+// UCP BTB banking model (trace_ucp_btb_banks): each demand prediction occupies its
+// BTB bank for the cycle and a UCP walk may only install a window whose lead-IP
+// bank is free.  Banks are FETCH-BLOCK granular (bank = (ip>>6) mod banks): real
+// BTBs index per fetch block, so a 16-wide sequential demand run touches ~1-2
+// banks/cycle and small realistic bank counts (2/4/8) are meaningful.  (The
+// UCP_ISCA24 artifact instead hashes per-instruction, ip>>2, and compensates with
+// 32 banks -- roughly the same collision odds at 16x the bank count.)  Demand
+// always wins; the artifact's probabilistic alternate-priority heuristic
+// (BTB_CONF_PROB) is omitted, making this conservative for UCP.  0 = ideal
+// porting (the artifact's shipped IDEAL_BTB_BANKING).
+void O3_CPU::ucp_note_demand_bank(uint64_t ip)
+{
+  if (ucp_bank_mask_stamp != current_time) {
+    ucp_bank_mask_stamp = current_time;
+    ucp_demand_bank_mask = 0;
+  }
+  ucp_demand_bank_mask |= 1ULL << ((ip >> 6) & (static_cast<uint64_t>(ucp_btb_banks) - 1));
+}
+
+bool O3_CPU::ucp_bank_conflict(uint64_t ip)
+{
+  // walks drain (check_dib) before this cycle's demand predictions are noted
+  // (initialize_instruction), so the freshest available mask is last cycle's --
+  // accept it: fetch is sequential, so consecutive cycles touch correlated banks
+  if (ucp_btb_banks <= 0 || ucp_bank_mask_stamp + clock_period < current_time) {
+    return false; // banking off, or no recent demand predictions
+  }
+  return (ucp_demand_bank_mask >> ((ip >> 6) & (static_cast<uint64_t>(ucp_btb_banks) - 1))) & 1ULL;
+}
+
 void O3_CPU::drain_alt_walks()
 {
   for (auto& w : alt_walks) {
@@ -389,6 +422,10 @@ void O3_CPU::drain_alt_walks()
       }
     }
     while (w.idx < w.windows.size() && w.ready <= current_time) {
+      if (w.ucp && ucp_bank_conflict(w.windows[w.idx].front())) {
+        ++sim_stats.ucp_bank_conflicts;
+        break; // BTB bank held by a demand prediction this cycle; retry next cycle
+      }
       // real-L1I mode: a window may only install once its line has arrived
       if (alt_walk_l1i
           && w.lines_ready.count(champsim::block_number{champsim::address{w.windows[w.idx].front()}}.to<uint64_t>()) == 0) {
@@ -1027,7 +1064,7 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   // walk).  Uncovered or walk-capped misses fall through to the normal miss path.
   // The wait leaves the entry un-checked (re-checks next cycle, L1I fetch held);
   // placed before any counter so re-checks are side-effect-free.
-  if (fill_mode == fill_mode_type::ALT && !hit && !warmup) {
+  if (fill_mode == fill_mode_type::ALT && !hit && (!warmup || trace_warmup_train)) {
     do_alt_trigger(instr.ip.to<uint64_t>());
     // wait-cap: wait on the fill buffer, not on DRAM.  An instruction stalls at
     // most alt_walk_wait_cap cycles on a pending window (enough to cover an
@@ -1053,7 +1090,7 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   // and the tail walk -- real L1I/L2 line fetches + pre-decode -- launches the
   // SAME cycle so its latency hides behind head consumption.  A miss in the tail
   // region launches the walk from that point and uses the ALT wait machinery.
-  if (fill_mode == fill_mode_type::HEAD && !hit && !warmup) {
+  if (fill_mode == fill_mode_type::HEAD && !hit && (!warmup || trace_warmup_train)) {
     const uint64_t rawip = instr.ip.to<uint64_t>();
     if (const auto* ips = fill_store.lookup_window(rawip); ips != nullptr && !ips->empty()) {
       const uint64_t wtag = rawip >> dib_window_bits;
@@ -1088,7 +1125,7 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   // the u-op cache as a demand-class fill; the slack histogram records how far
   // ahead of demand the walk ran.  A miss whose window is in an in-flight walk
   // uses the wait machinery.
-  if (fill_mode == fill_mode_type::CHAIN && !hit && !warmup) {
+  if (fill_mode == fill_mode_type::CHAIN && !hit && (!warmup || trace_warmup_train)) {
     const uint64_t rawip = instr.ip.to<uint64_t>();
     const uint64_t wtag = rawip >> dib_window_bits;
     auto bit = std::find_if(std::begin(uop_buffer), std::end(uop_buffer), [wtag](const auto& e) { return e.tag == wtag; });
@@ -1225,7 +1262,7 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
   // build-mode stretch; miss extends the current one). See inc/trace_stall.h.  When
   // it commits a new trace and trace-fill is on, push it into the trace cache -- so
   // trace_builder=stall makes the stall segmenter the fill source.
-  if (trace_stall_enable && !warmup) {
+  if (trace_stall_enable && (!warmup || trace_warmup_train)) {
     const std::size_t before = stall.get_traces().size();
     stall.on_dib(instr.ip.to<uint64_t>(), hit, sim_stats);
     if (fill_mode != fill_mode_type::OFF) {
@@ -1588,8 +1625,10 @@ long O3_CPU::dispatch_instruction()
     // threshold 0 = fully empty (the tight condition); a higher value broadens the
     // trigger to partial (near-empty) stalls, capturing recurring stretches the
     // fully-empty trigger misses.
-    if (trace_stall_enable && !warmup && std::size(ROB) <= stall_rob_threshold) {
-      stall.note_stall();
+    if (trace_stall_enable && (!warmup || trace_warmup_train) && std::size(ROB) <= stall_rob_threshold) {
+      if (!stall.note_stall()) {
+        ++sim_stats.stall_marks_dropped; // tight-stall cycle after the stretch closed (attribution race)
+      }
     }
   }
 
@@ -1858,7 +1897,7 @@ long O3_CPU::handle_memory_return()
         // L1I-miss admission gate: a fetch that took longer than an L1I hit round
         // trip missed L1I; mark the segmenter's in-flight stretch (loose
         // attribution, same style as the ROB-drain note_stall signal).
-        if (trace_stall_enable && !warmup && current_time - fetched->fetch_issue_time > STALL_L1I_MISS_CYCLES * clock_period) {
+        if (trace_stall_enable && (!warmup || trace_warmup_train) && current_time - fetched->fetch_issue_time > STALL_L1I_MISS_CYCLES * clock_period) {
           stall.note_l1i_miss();
         }
         fetch_bw.consume();

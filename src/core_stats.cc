@@ -25,6 +25,7 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.store_win_shared -= rhs.store_win_shared;
   // store_occupancy is a level, not a counter: keep the end-of-phase value
   lhs.stall_traces -= rhs.stall_traces;
+  lhs.stall_marks_dropped -= rhs.stall_marks_dropped;
   lhs.stall_event_traces -= rhs.stall_event_traces;
   lhs.stall_event_candidates -= rhs.stall_event_candidates;
   lhs.stall_event_dedup -= rhs.stall_event_dedup;
@@ -93,6 +94,7 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.ucp_stop_btbmiss -= rhs.ucp_stop_btbmiss;
   lhs.ucp_stop_maxip -= rhs.ucp_stop_maxip;
   lhs.ucp_ind_walked -= rhs.ucp_ind_walked;
+  lhs.ucp_bank_conflicts -= rhs.ucp_bank_conflicts;
   lhs.fe_stall_steady -= rhs.fe_stall_steady;
   lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
   lhs.rob_idle_steady -= rhs.rob_idle_steady;

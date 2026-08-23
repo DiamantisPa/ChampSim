@@ -125,13 +125,18 @@ public:
   // a costly-enough backend stall was observed in build mode (ROB at/below the
   // configured threshold): mark the in-flight stretch as costly, so it will be
   // committed at the next hit.  Called once per stalled cycle, so the count is
-  // the stretch's cost in ROB-stall cycles.
-  void note_stall()
+  // the stretch's cost in ROB-stall cycles.  Returns false when no stretch is
+  // open -- the close-to-drain attribution race (the stretch already committed
+  // before its pipeline bubble finished draining the ROB); the caller counts
+  // these dropped marks.
+  bool note_stall()
   {
     if (recording) {
       costly = true;
       ++stretch_cost;
+      return true;
     }
+    return false;
   }
 
   [[nodiscard]] bool covers(uint64_t ip) const { return cov.covers(ip); }

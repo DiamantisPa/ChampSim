@@ -60,6 +60,8 @@ core_builder_parts = {
     'trace_ucp_max_ip': '.trace_ucp_max_ip({trace_ucp_max_ip})',
     'trace_ucp_step': '.trace_ucp_step({trace_ucp_step})',
     'trace_ucp_altind': '.trace_ucp_altind({trace_ucp_altind})',
+    'trace_ucp_btb_banks': '.trace_ucp_btb_banks({trace_ucp_btb_banks})',
+    'trace_warmup_train': '.trace_warmup_train({trace_warmup_train})',
     'trace_walk_issue_cap': '.trace_walk_issue_cap({trace_walk_issue_cap})',
     'trace_walk_decode_cap': '.trace_walk_decode_cap({trace_walk_decode_cap})',
     'trace_walk_decode_shared': '.trace_walk_decode_shared({trace_walk_decode_shared})',

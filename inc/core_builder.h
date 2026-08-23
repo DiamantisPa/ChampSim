@@ -74,6 +74,8 @@ struct core_builder_base {
   int m_trace_ucp_max_ip{64};          // UCP: straight-line steps without a branch before the walk stops
   int m_trace_ucp_step{4};             // UCP: alt-path instruction stride in bytes (ARM traces: 4)
   int m_trace_ucp_altind{0};           // UCP: 1 = 4KB Alt-ITTAGE, walks continue through indirects (12.95KB flavor)
+  int m_trace_ucp_btb_banks{0};        // UCP: >0 = model N BTB banks (walk installs stall on demand bank conflicts); 0 = ideal banking
+  int m_trace_warmup_train{0};         // 1 = chain/UCP train (and prefetch) during warmup, like the UCP_ISCA24 artifact; 0 = cold-start at ROI
   int m_trace_walk_issue_cap{0};       // walks: global line-issues per cycle across all walks (0 = unlimited legacy schema)
   int m_trace_walk_decode_cap{0};      // walks: global window-installs (pre-decodes) per cycle (0 = unlimited legacy schema)
   int m_trace_walk_decode_shared{0};   // walks: 1 = installs only when demand is in stream mode (shared decoders, no dedicated hw)
@@ -306,6 +308,8 @@ public:
   self_type& trace_ucp_max_ip(int trace_ucp_max_ip_);
   self_type& trace_ucp_step(int trace_ucp_step_);
   self_type& trace_ucp_altind(int trace_ucp_altind_);
+  self_type& trace_ucp_btb_banks(int trace_ucp_btb_banks_);
+  self_type& trace_warmup_train(int trace_warmup_train_);
   self_type& trace_walk_issue_cap(int trace_walk_issue_cap_);
   self_type& trace_walk_decode_cap(int trace_walk_decode_cap_);
   self_type& trace_walk_decode_shared(int trace_walk_decode_shared_);
@@ -729,6 +733,20 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_ucp_altind(int trace_ucp_altind_) -> self_type&
 {
   m_trace_ucp_altind = trace_ucp_altind_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_ucp_btb_banks(int trace_ucp_btb_banks_) -> self_type&
+{
+  m_trace_ucp_btb_banks = trace_ucp_btb_banks_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_warmup_train(int trace_warmup_train_) -> self_type&
+{
+  m_trace_warmup_train = trace_warmup_train_;
   return *this;
 }
 

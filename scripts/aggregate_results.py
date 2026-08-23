@@ -25,7 +25,7 @@ RE_TIGHT = re.compile(r'frontend-loss backend-idle \(tight\): steady (\d+) recov
 RE_STG = re.compile(r'trace-stg: loop (\d+) function (\d+) dedup-hits (\d+) entangled (\d+) '
                     r'dropped: bad-layout (\d+) overflow (\d+) short (\d+) stored-uops (\d+)', re.M)
 RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
-RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)(?: l1i-gated (\d+))?', re.M)
+RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)(?: l1i-gated (\d+))?(?: marks-dropped (\d+))?', re.M)
 RE_STALL_COV = re.compile(r'trace-stall coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
 RE_STORE = re.compile(r'trace-store: evictions (\d+) conflict-evictions (\d+) occupancy (\d+)(?: windows (\d+) shared (\d+))?', re.M)
 RE_EVENT = re.compile(r'trace-event: probes (\d+) probe-hits (\d+) traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+)', re.M)
@@ -51,7 +51,7 @@ RE_CHAIN = re.compile(r'trace-chain: unencodable (\d+) truncated (\d+) buffer-hi
                       r'(?: filtered (\d+))? slack\(4/8/16/32/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
 
 RE_UCPPORT = re.compile(r'trace-ucp: cond (\d+) cond-misses (\d+) h2p-marked (\d+) h2p-marked-misses (\d+) paths (\d+) '
-                        r'stops\(sat/ind/btbmiss/maxip\): (\d+) (\d+) (\d+) (\d+)(?: ind-walked (\d+))?', re.M)
+                        r'stops\(sat/ind/btbmiss/maxip\): (\d+) (\d+) (\d+) (\d+)(?: ind-walked (\d+))?(?: bank-conflicts (\d+))?', re.M)
 
 # UCP_ISCA24 artifact output format (their profiler printer; ROI IPC line is standard)
 RE_UCP_HIT = re.compile(r'^UOP_CACHE_HIT:\s+([\d.]+)', re.M)
@@ -128,6 +128,7 @@ def parse_file(path):
         d['stall_traces'], d['stall_candidates'] = int(st.group(1)), int(st.group(2))
         d['stall_dedup'], d['stall_stored_uops'] = int(st.group(3)), int(st.group(4))
         d['stall_l1i_gated'] = int(st.group(5)) if st.group(5) else None
+        d['stall_marks_dropped'] = int(st.group(6)) if st.group(6) else None
     stc = RE_STALL_COV.search(txt)
     if stc:
         d['stall_uniq_cov'], d['stall_uniq_seen'] = int(stc.group(1)), int(stc.group(2))
@@ -192,6 +193,7 @@ def parse_file(path):
         (d['ucpp_cond'], d['ucpp_cond_miss'], d['ucpp_marked'], d['ucpp_marked_miss'], d['ucpp_paths'],
          d['ucpp_stop_sat'], d['ucpp_stop_ind'], d['ucpp_stop_btbmiss'], d['ucpp_stop_maxip']) = (int(up2.group(i)) for i in range(1, 10))
         d['ucpp_ind_walked'] = int(up2.group(10)) if up2.group(10) else 0
+        d['ucpp_bank_conf'] = int(up2.group(11)) if up2.group(11) else 0
     for key, rx in (('s_oo', RE_OCC_AVGOCC), ('s_ol', RE_OCC_AVGLEN), ('s_co', RE_COV_AVGOCC), ('s_cl', RE_COV_AVGLEN),
                     ('s_ko', RE_CST_AVGOCC), ('s_kl', RE_CST_AVGLEN)):
         mm2 = rx.search(txt)
@@ -214,12 +216,30 @@ def pct(num, den):
     return 100.0 * num / den if den else float('nan')
 
 
+_STRIP_EXTS = ('.out', '.txt', '.log', '.gz', '.xz', '.champsimtrace', '.champsim', '.trace',
+               '_ap')  # cvp1ap runs suffix the trace name with _ap; subset lists don't
+
+
+def canon_name(name):
+    """Canonical simpoint name: drop any trailing run/trace/compression suffixes
+    so include lists, output files, and baseline files all key the same way."""
+    changed = True
+    while changed:
+        changed = False
+        for ext in _STRIP_EXTS:
+            if name.endswith(ext) and len(name) > len(ext):
+                name = name[:-len(ext)]
+                changed = True
+    return name
+
+
 def load_rows(path, pattern, include):
     files = sorted(glob.glob(os.path.join(path, pattern)))
-    rows, skipped = [], 0
+    rows, skipped, inc_skipped = [], 0, 0
     for fp in files:
-        name = os.path.splitext(os.path.basename(fp))[0]
+        name = canon_name(os.path.basename(fp))
         if include is not None and name not in include:
+            inc_skipped += 1
             continue
         d = parse_file(fp)
         if d is None:
@@ -227,13 +247,22 @@ def load_rows(path, pattern, include):
             continue
         d['name'] = name
         rows.append(d)
-    return rows, skipped
+    return rows, skipped, inc_skipped
 
 
 def aggregate(path, pattern, include, baseline=None, scatter=False):
-    rows, skipped = load_rows(path, pattern, include)
+    rows, skipped, inc_skipped = load_rows(path, pattern, include)
 
     print(f"\n=== {path} ===")
+    if include is not None:
+        print(f"[include] kept {len(rows)} simpoint(s), skipped {inc_skipped} not in list")
+        if not rows and inc_skipped:
+            files = sorted(glob.glob(os.path.join(path, pattern)))[:3]
+            print("[include] NO MATCHES - derived file names look like:")
+            for fp in files:
+                print(f"[include]   file: {os.path.basename(fp)!r} -> {canon_name(os.path.basename(fp))!r}")
+            for n in sorted(include)[:3]:
+                print(f"[include]   list: {n!r}")
     print(f"simpoints: {len(rows)}  (skipped {skipped} with no ROI IPC)")
     if not rows:
         return
@@ -290,6 +319,9 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
         iw = amean([r.get('ucpp_ind_walked', 0) for r in have_up])
         if iw > 0:
             print(f"Alt-Ind:           {iw:,.0f} indirects walked through on a predicted target")
+        bc = amean([r.get('ucpp_bank_conf', 0) for r in have_up])
+        if bc > 0:
+            print(f"BTB banking:       {bc:,.0f} walk-install stalls on demand bank conflicts")
 
     # L1I prefetch traffic (any run that issued prefetches: UCP alt path, L1I prefetchers)
     have_lp = [r for r in rows if r.get('l1i_pref_issued', 0) > 0]
@@ -324,6 +356,12 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
         gated = [r['stall_l1i_gated'] for r in have_stall if r.get('stall_l1i_gated') is not None]
         if gated and amean(gated) > 0:
             print(f"l1i-gated out:     {amean(gated):,.0f} costly stretches (no L1I miss observed)")
+        md = [r for r in have_stall if r.get('stall_marks_dropped') is not None]
+        if md:
+            md_abs = amean([r['stall_marks_dropped'] for r in md])
+            md_den = [r for r in md if r.get('ti_total')]
+            md_pct = amean([pct(r['stall_marks_dropped'], r['ti_total']) for r in md_den]) if md_den else float('nan')
+            print(f"marks dropped:     {md_abs:,.0f} tight-stall cycles with no open stretch ({md_pct:.1f}% of tight cycles)")
         print(f"stored u-ops:      {amean([r['stall_stored_uops'] for r in have_stall]):,.0f}")
         have_store = [r for r in have_stall if 'store_evict' in r]
         if have_store:
@@ -478,12 +516,13 @@ def main():
     include = None
     if args.include:
         with open(args.include) as f:
-            include = {line.strip() for line in f if line.strip()}
+            # tolerate scatter-style lists: take the first token, drop any path
+            include = {canon_name(os.path.basename(line.split()[0])) for line in f if line.strip()}
         print(f"[include] {len(include)} simpoint name(s); analysis restricted to these")
 
     baseline = None
     if args.baseline:
-        base_rows, base_skipped = load_rows(args.baseline, args.pattern, include)
+        base_rows, base_skipped, _ = load_rows(args.baseline, args.pattern, include)
         baseline = {r['name']: r['ipc'] for r in base_rows}
         print(f"[baseline] {args.baseline}: {len(baseline)} workloads (skipped {base_skipped})")
 

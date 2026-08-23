@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 585" role="img"
+     aria-label="Chain trace-metadata prefetching overlaid on a decoupled frontend: capture at costly stalls into a 40KB metadata store, FTQ probe, walk through the existing L1I and a narrow pre-decoder into a staging buffer, demand-promoted into the micro-op cache."
+     font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52514e"/>
+    </marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2a78d6"/>
+    </marker>
+  </defs>
+
+  <!-- ===================== baseline frontend (gray) ===================== -->
+  <!-- build path: L1I -> decoders (top) -->
+  <rect x="430" y="30" width="95" height="56" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="477" y="53" text-anchor="middle" font-size="15" fill="#1a1a1a">L1I</text>
+  <text x="477" y="72" text-anchor="middle" font-size="12" fill="#52514e">32 KB</text>
+
+  <rect x="560" y="30" width="120" height="56" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="620" y="53" text-anchor="middle" font-size="15" fill="#1a1a1a">Decoders</text>
+  <text x="620" y="72" text-anchor="middle" font-size="12" fill="#52514e">8-wide</text>
+
+  <!-- main row -->
+  <rect x="20" y="120" width="112" height="64" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="76" y="146" text-anchor="middle" font-size="15" fill="#1a1a1a">Branch pred.</text>
+  <text x="76" y="165" text-anchor="middle" font-size="11.5" fill="#52514e">TAGE-SC-L / BTB</text>
+
+  <rect x="162" y="120" width="106" height="64" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="215" y="146" text-anchor="middle" font-size="15" fill="#1a1a1a">FTQ</text>
+  <text x="215" y="165" text-anchor="middle" font-size="12" fill="#52514e">192 entries</text>
+
+  <rect x="300" y="120" width="80" height="64" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="340" y="157" text-anchor="middle" font-size="15" fill="#1a1a1a">Fetch</text>
+
+  <!-- stream path: uop cache (bottom) -->
+  <rect x="470" y="210" width="210" height="64" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="575" y="236" text-anchor="middle" font-size="15" fill="#1a1a1a">µ-op cache</text>
+  <text x="575" y="255" text-anchor="middle" font-size="12" fill="#52514e">6K µ-ops · 12 µ-ops/cyc</text>
+
+  <rect x="720" y="120" width="100" height="64" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="770" y="146" text-anchor="middle" font-size="15" fill="#1a1a1a">µ-op queue</text>
+  <text x="770" y="165" text-anchor="middle" font-size="12" fill="#52514e">144</text>
+
+  <rect x="850" y="120" width="90" height="64" rx="6" fill="#f2f1ee" stroke="#a9a7a0"/>
+  <text x="895" y="146" text-anchor="middle" font-size="15" fill="#1a1a1a">Dispatch</text>
+  <text x="895" y="165" text-anchor="middle" font-size="12" fill="#52514e">8-wide → ROB</text>
+
+  <!-- baseline arrows -->
+  <line x1="132" y1="152" x2="158" y2="152" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+  <line x1="268" y1="152" x2="296" y2="152" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+  <!-- build (miss) path -->
+  <polyline points="340,120 340,58 426,58" fill="none" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+  <text x="352" y="100" font-size="12" fill="#52514e">build (µ-op-$ miss)</text>
+  <line x1="525" y1="58" x2="556" y2="58" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+  <polyline points="680,58 770,58 770,116" fill="none" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+  <!-- stream (hit) path -->
+  <polyline points="340,184 340,242 466,242" fill="none" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+  <text x="352" y="230" font-size="12" fill="#52514e">stream (hit)</text>
+  <polyline points="680,242 770,242 770,188" fill="none" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+  <line x1="820" y1="152" x2="846" y2="152" stroke="#52514e" stroke-width="1.6" marker-end="url(#ag)"/>
+
+  <!-- ===================== chain overlay (blue) ===================== -->
+  <rect x="140" y="400" width="250" height="90" rx="6" fill="#e7f0fb" stroke="#2a78d6" stroke-width="1.6"/>
+  <circle cx="162" cy="422" r="11" fill="#2a78d6"/>
+  <text x="162" y="427" text-anchor="middle" font-size="13" fill="#ffffff">2</text>
+  <text x="272" y="426" text-anchor="middle" font-size="15" fill="#1a1a1a">Trace metadata store</text>
+  <text x="265" y="447" text-anchor="middle" font-size="12" fill="#52514e">8192 traces × 2 window ptrs + cost</text>
+  <text x="265" y="466" text-anchor="middle" font-size="12" fill="#52514e">1024×8, XOR index · ~40 KB</text>
+
+  <rect x="430" y="400" width="160" height="90" rx="6" fill="#e7f0fb" stroke="#2a78d6" stroke-width="1.6"/>
+  <circle cx="452" cy="422" r="11" fill="#2a78d6"/>
+  <text x="452" y="427" text-anchor="middle" font-size="13" fill="#ffffff">4</text>
+  <text x="518" y="426" text-anchor="middle" font-size="15" fill="#1a1a1a">Walk engine</text>
+  <text x="510" y="447" text-anchor="middle" font-size="12" fill="#52514e">up to 32 in flight</text>
+  <text x="510" y="466" text-anchor="middle" font-size="12" fill="#52514e">shared decoders, 1 win/cyc</text>
+
+  <rect x="620" y="400" width="180" height="70" rx="6" fill="#e7f0fb" stroke="#2a78d6" stroke-width="1.6"/>
+  <circle cx="642" cy="422" r="11" fill="#2a78d6"/>
+  <text x="642" y="427" text-anchor="middle" font-size="13" fill="#ffffff">5</text>
+  <text x="718" y="426" text-anchor="middle" font-size="15" fill="#1a1a1a">Staging buffer</text>
+  <text x="710" y="447" text-anchor="middle" font-size="12" fill="#52514e">32-window FIFO · ~1 KB</text>
+
+  <!-- (3) probe: FTQ -> store -->
+  <line x1="215" y1="184" x2="215" y2="396" stroke="#2a78d6" stroke-width="1.8" marker-end="url(#ab)"/>
+  <circle cx="215" cy="290" r="11" fill="#2a78d6"/>
+  <text x="215" y="295" text-anchor="middle" font-size="13" fill="#ffffff">3</text>
+  <text x="232" y="285" font-size="12" fill="#2a78d6">probe every enqueued PC</text>
+  <text x="232" y="302" font-size="12" fill="#2a78d6">(hit = lead of up to 192 instr)</text>
+
+  <!-- trigger: store -> walk -->
+  <line x1="390" y1="440" x2="426" y2="440" stroke="#2a78d6" stroke-width="1.8" marker-end="url(#ab)"/>
+  <text x="408" y="430" text-anchor="middle" font-size="11.5" fill="#2a78d6">trigger</text>
+
+  <!-- (4) walk -> L1I (shares the demand path) -->
+  <line x1="452" y1="400" x2="452" y2="90" stroke="#2a78d6" stroke-width="1.8" marker-end="url(#ab)"/>
+  <text x="464" y="325" font-size="12" fill="#2a78d6">fetch lines via the real L1I</text>
+  <text x="464" y="342" font-size="12" fill="#2a78d6">(1 line/cyc, real misses)</text>
+
+  <!-- (5) walk -> staging -->
+  <line x1="590" y1="440" x2="616" y2="440" stroke="#2a78d6" stroke-width="1.8" marker-end="url(#ab)"/>
+
+  <!-- (6) staging -> uop cache -->
+  <line x1="648" y1="400" x2="648" y2="278" stroke="#2a78d6" stroke-width="1.8" marker-end="url(#ab)"/>
+  <circle cx="648" cy="340" r="11" fill="#2a78d6"/>
+  <text x="648" y="345" text-anchor="middle" font-size="13" fill="#ffffff">6</text>
+  <text x="664" y="335" font-size="12" fill="#2a78d6">promote on demand miss</text>
+  <text x="664" y="352" font-size="12" fill="#2a78d6">(every insertion is used)</text>
+
+  <!-- (1) capture: dispatch -> store -->
+  <polyline points="895,184 895,530 265,530 265,494" fill="none" stroke="#2a78d6" stroke-width="1.8" marker-end="url(#ab)"/>
+  <circle cx="580" cy="530" r="11" fill="#2a78d6"/>
+  <text x="580" y="535" text-anchor="middle" font-size="13" fill="#ffffff">1</text>
+  <text x="598" y="524" font-size="12" fill="#2a78d6">capture the stretch after a ROB-empty build-mode stall</text>
+  <text x="598" y="541" font-size="12" fill="#2a78d6">(admit after 2 occurrences)</text>
+
+  <!-- callout -->
+  <text x="20" y="572" font-size="12.5" fill="#1a1a1a">Added state ~45 KB (store + cost + buffer). µ-ops are rematerialized through the existing L1I and decoders — never stored.</text>
+</svg>
