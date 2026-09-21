@@ -30,8 +30,8 @@
       "branch_predictor": "tage_sc_l",
       "btb": "basic_btb",
       "ftq_depth": 192,
-      "trace_builder": "off",
-      "trace_fill": "off",
+      "trace_builder": "stall",
+      "trace_fill": "chain",
       "trace_stall_mispredict": 0,
       "trace_stall_min_occ": 2,
       "trace_stall_rob": 0,
@@ -58,12 +58,14 @@
       "trace_uop_buffer": 32,
       "trace_probe_ahead": 192,
       "trace_walk_filter": 1,
-      "trace_ucp": 1,
+      "trace_launch_conf": 0,
+      "trace_ucp": 0,
       "trace_ucp_threshold": 500,
       "trace_ucp_max_ip": 64,
       "trace_ucp_step": 4,
       "trace_ucp_altind": 0,
-      "trace_ucp_btb_banks": 4
+      "trace_ucp_btb_banks": 4,
+      "trace_warmup_train": 1
     }
   ],
   "DIB": {

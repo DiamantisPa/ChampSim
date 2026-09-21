@@ -55,6 +55,7 @@ core_builder_parts = {
     'trace_meta_windows': '.trace_meta_windows({trace_meta_windows})',
     'trace_probe_ahead': '.trace_probe_ahead({trace_probe_ahead})',
     'trace_walk_filter': '.trace_walk_filter({trace_walk_filter})',
+    'trace_launch_conf': '.trace_launch_conf({trace_launch_conf})',
     'trace_ucp': '.trace_ucp({trace_ucp})',
     'trace_ucp_threshold': '.trace_ucp_threshold({trace_ucp_threshold})',
     'trace_ucp_max_ip': '.trace_ucp_max_ip({trace_ucp_max_ip})',

@@ -4,6 +4,7 @@
 Per suite: 6Ki realized (solid), 6Ki+UCP-noind (mid tint, backslash hatch),
 cold-miss ideal (light tint, slash hatch), all over the no-u-op-cache baseline.
 UCP rows are the 4-bank realistic-banking builds.  zen5_final platform.
+CVP-1 uses the wrap-free W50M+I100M runs (traces ~100M instr).
 """
 import matplotlib
 
@@ -15,7 +16,7 @@ from matplotlib.patches import Patch
 DATA = {
     "Qualcomm": (0.927, 2.450, 16.892, 76),
     "Google": (0.278, 2.229, 6.107, 43),
-    "CVP-1": (2.994, 3.756, 10.216, 143),
+    "CVP-1": (2.955, 3.870, 10.448, 143),
 }
 
 HUES = ["#2a78d6", "#eb6834", "#1baf7a"]

@@ -16,7 +16,7 @@ from matplotlib.patches import Patch
 DATA = {
     "Qualcomm": (0.927, 16.892, 76),
     "Google": (0.278, 6.107, 43),
-    "CVP-1": (2.994, 10.216, 143),
+    "CVP-1": (2.955, 10.448, 143),  # wrap-free W50+I100
 }
 
 # reference palette: categorical slots 1-3 (validated all-pairs); tint via alpha

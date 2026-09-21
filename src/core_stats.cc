@@ -72,6 +72,7 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.alt_installed_windows -= rhs.alt_installed_windows;
   lhs.alt_late_misses -= rhs.alt_late_misses;
   lhs.alt_useful_hits -= rhs.alt_useful_hits;
+  lhs.alt_pf_evicted_unused -= rhs.alt_pf_evicted_unused;
   lhs.alt_wait_cycles -= rhs.alt_wait_cycles;
   lhs.alt_lines_issued -= rhs.alt_lines_issued;
   lhs.alt_line_stalls -= rhs.alt_line_stalls;
@@ -81,6 +82,11 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.chain_buf_hits -= rhs.chain_buf_hits;
   lhs.chain_buf_evict_unused -= rhs.chain_buf_evict_unused;
   lhs.chain_filtered_windows -= rhs.chain_filtered_windows;
+  lhs.chain_conf_suppressed -= rhs.chain_conf_suppressed;
+  lhs.chain_evicted_then_missed -= rhs.chain_evicted_then_missed;
+  for (std::size_t i = 0; i < lhs.chain_evicted_age.size(); ++i) {
+    lhs.chain_evicted_age[i] -= rhs.chain_evicted_age[i];
+  }
   for (std::size_t i = 0; i < lhs.chain_slack.size(); ++i) {
     lhs.chain_slack[i] -= rhs.chain_slack[i];
   }
@@ -99,6 +105,8 @@ cpu_stats operator-(cpu_stats lhs, cpu_stats rhs)
   lhs.fe_stall_recovery -= rhs.fe_stall_recovery;
   lhs.rob_idle_steady -= rhs.rob_idle_steady;
   lhs.rob_idle_recovery -= rhs.rob_idle_recovery;
+  lhs.fe_lost_slots_steady -= rhs.fe_lost_slots_steady;
+  lhs.fe_lost_slots_recovery -= rhs.fe_lost_slots_recovery;
 
   lhs.seg_traces_loop -= rhs.seg_traces_loop;
   lhs.seg_traces_function -= rhs.seg_traces_function;

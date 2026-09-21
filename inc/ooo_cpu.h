@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <deque>
+#include <unordered_map>
 #include <set>
 #include <limits>
 #include <memory>
@@ -213,8 +214,16 @@ public:
     uint64_t tag = 0;                                  // window tag
     std::vector<uint64_t> ips;                         // the window's uops (promotion payload)
     champsim::chrono::clock::time_point probe_time{};  // walk trigger time (slack stat)
+    uint64_t origin = 0;                               // entry PC of the trace whose walk staged it (launch-confidence feedback)
   };
   std::deque<uop_buf_entry> uop_buffer; // trace-uop staging buffer (FIFO)
+  // measurement only (no timing effect): the last UOP_BUF_EVICT_LOG windows
+  // evicted from the staging buffer unused, so a later demand miss on one of
+  // them can be attributed to buffer capacity ("evicted-then-missed" = the
+  // opportunity of a larger FIFO).  Entries are consumed on first match.
+  static constexpr std::size_t UOP_BUF_EVICT_LOG = 1024;
+  std::deque<std::pair<uint64_t, champsim::chrono::clock::time_point>> uop_buf_evict_log; // (window tag, eviction time)
+  std::unordered_map<uint64_t, champsim::chrono::clock::time_point> uop_buf_evict_map;    // tag -> latest eviction time
   int uop_buffer_windows = 16;          // capacity in windows (16 x 8 uops x 8B = 1KB; 0 = install direct to DIB)
   int meta_windows = 4;                 // manifest capacity: window slots per trace (entry + deltas)
   // deep probe: scan the instruction supply up to N instructions AHEAD of the
@@ -229,6 +238,7 @@ public:
   // windows in the u-op cache and the staging buffer, and fetch/stage ONLY the
   // absent ones -- kills redundant staging (walks shorten, slots free up).
   bool alt_walk_filter = false;
+  int chain_launch_conf = 0;           // trace_launch_conf: 0 off, 1 gate launches on conf > 0, 2 = also conf-aware eviction
 
   // UCP port (Singh et al., ISCA'24 "Alternate Path u-op Cache Prefetching"):
   // on a hard-to-predict conditional (TAGE-SC-L confidence, classification
@@ -381,7 +391,7 @@ public:
   void do_alt_trigger(uint64_t alt_pc);
   void do_head_trigger(const std::vector<uint64_t>& ips, std::size_t start_idx);
   void do_chain_trigger(const std::vector<uint64_t>& ips);
-  void uop_buffer_push(const std::vector<uint64_t>& window_ips, champsim::chrono::clock::time_point probe_time);
+  void uop_buffer_push(const std::vector<uint64_t>& window_ips, champsim::chrono::clock::time_point probe_time, uint64_t origin);
   [[nodiscard]] std::vector<uint64_t> chain_encode(const std::vector<uint64_t>& ips, bool& truncated, bool& encodable) const;
   [[nodiscard]] bool alt_window_pending(uint64_t rawip) const;
   [[nodiscard]] alt_walk* alt_pending_walk(uint64_t rawip); // like alt_window_pending, but skips background walks
@@ -627,6 +637,11 @@ public:
       if (const char* e = std::getenv("PROMETHEUS_WALK_FILTER"); e != nullptr && *e != '\0') {
         alt_walk_filter = (std::atoi(e) != 0); // per-window residency filter at walk launch
       }
+      chain_launch_conf = std::clamp(b.m_trace_launch_conf, 0, 2);
+      if (const char* e = std::getenv("PROMETHEUS_LAUNCH_CONF"); e != nullptr && *e != '\0') {
+        chain_launch_conf = std::clamp(std::atoi(e), 0, 2); // 0 off, 1 gate launches, 2 + conf-aware eviction
+      }
+      fill_store.set_conf_evict(chain_launch_conf == 2);
     }
 
     stall_mispredict_mode = (b.m_trace_stall_mispredict < 0) ? 0 : b.m_trace_stall_mispredict;
@@ -710,7 +725,8 @@ public:
               << " walk_width=" << alt_walk_width
               << " walk_delay=" << alt_walk_delay_cycles << " walk_l1i=" << alt_walk_l1i << " walk_wait=" << alt_walk_wait_mode
               << " wait_cap=" << alt_walk_wait_cap << " issue_cap=" << alt_walk_issue_cap << " decode_cap=" << alt_walk_decode_cap
-              << " decode_shared=" << alt_walk_decode_shared << " walk_filter=" << alt_walk_filter << " uop_buffer=" << uop_buffer_windows
+              << " decode_shared=" << alt_walk_decode_shared << " walk_filter=" << alt_walk_filter << " launch_conf=" << chain_launch_conf
+              << " uop_buffer=" << uop_buffer_windows
               << " probe_ahead=" << chain_probe_ahead << " ftq_depth=" << IN_QUEUE_SIZE << " mispredict_trigger=" << stall_mispredict_mode
               << " head_uops=" << head_uops << " tail_targets=" << tail_targets
               << " ucp=" << ucp_enable << " ucp_T=" << ucp_threshold << " ucp_max_ip=" << ucp_max_ip_check << " ucp_step=" << ucp_step

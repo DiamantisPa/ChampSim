@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Figure 3c (evaluation): backend-idle under EP-4Ke with UCP-noind added.\n(UCP loss decomposition exists only in the EP-4Ke regime; CVP UCP pending.)
+"""Figure 3c (evaluation): backend-idle with UCP-noind (banks4) added.
 
 1x3 small multiples (one per suite, all no-L1I-prefetcher): backend-idle
-cycles (% of runtime) for 6K / 24K u-op caches and the cold-miss ideal,
-stacked steady-state (solid) vs post-mispredict recovery (tint+hatch).
+cycles (% of runtime) for 6K / 24K u-op caches, 6K+UCP, and the cold-miss
+ideal, stacked steady-state (solid) vs post-mispredict recovery (tint+hatch).
 zen5_final platform; CVP-1 restricted to the >=3%-headroom subset.
+CVP 6K and 6K+UCP columns are wrap-free W50M+I50M; UCP rows from the
+ucp_noind_w dumps (qualcomm/google I150M).
 """
 import matplotlib
 
@@ -18,15 +20,18 @@ CONFIGS = ["6K", "24K", "6K\n+UCP", "ideal"]
 DATA = {
     "Qualcomm": {
         "hue": "#2a78d6",
-        "idle": [(6.54, 0.423), (5.41, 0.487), (5.09, 0.364), (0.75, 0.238)],
+        "idle": [(6.54, 0.423), (5.41, 0.487), (5.07, 0.362), (0.75, 0.238)],
     },
     "Google": {
         "hue": "#eb6834",
-        "idle": [(5.37, 0.411), (5.00, 0.421), (3.89, 0.335), (1.99, 0.336)],
+        "idle": [(5.37, 0.411), (5.00, 0.421), (3.88, 0.335), (1.99, 0.336)],
     },
     "CVP-1": {
         "hue": "#1baf7a",
-        "idle": [(3.00, 0.353), (2.12, 0.404), (2.11, 0.285), (0.73, 0.299)],
+        # 6K and 6K+UCP wrap-free W50M+I50M (Sep 4 rebuild, 143/143); 24K/ideal
+        # still I150M (TODO: refresh when their I50M loss dumps exist --
+        # I150M understates idle)
+        "idle": [(3.87, 0.326), (2.12, 0.404), (2.63, 0.257), (0.73, 0.299)],
     },
 }
 YMAX = 7.4

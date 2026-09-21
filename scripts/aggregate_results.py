@@ -22,6 +22,8 @@ RE_SWITCH = re.compile(r'uop-cache mode-switch stalls:\s+\d+\s+MPKI:\s+([\d.]+)'
 RE_MISS = re.compile(r'frontend-loss misses: steady (\d+) \(traced (\d+)\) recovery (\d+) \(traced (\d+)\) \(of (\d+) total', re.M)
 RE_UPPER = re.compile(r'frontend-loss stall-cycles \(upper\): steady (\d+) recovery (\d+) switch (\d+) \| total (\d+)', re.M)
 RE_TIGHT = re.compile(r'frontend-loss backend-idle \(tight\): steady (\d+) recovery (\d+) \| total (\d+)', re.M)
+RE_LOST = re.compile(r'frontend-loss lost-slots \(mid\): steady (\d+) recovery (\d+) \| total (\d+) slots', re.M)
+DISPATCH_WIDTH = 8  # zen5_final dispatch width, for slot -> cycle-equivalent conversion
 RE_STG = re.compile(r'trace-stg: loop (\d+) function (\d+) dedup-hits (\d+) entangled (\d+) '
                     r'dropped: bad-layout (\d+) overflow (\d+) short (\d+) stored-uops (\d+)', re.M)
 RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
@@ -45,10 +47,13 @@ RE_COV_AVGOCC = re.compile(r'trace-stall top-by-coverage avg-occ: ' + _bktv, re.
 RE_COV_AVGLEN = re.compile(r'trace-stall top-by-coverage avg-len: ' + _bktv, re.M)
 RE_CST_AVGOCC = re.compile(r'trace-stall top-by-cost avg-occ: ' + _bktv, re.M)
 RE_CST_AVGLEN = re.compile(r'trace-stall top-by-cost avg-len: ' + _bktv, re.M)
-RE_ALT = re.compile(r'trace-alt: triggers (\d+) dropped (\d+) installed-windows (\d+) late-misses (\d+)(?: useful-hits (\d+))?(?: wait-cycles (\d+))?'
+RE_ALT = re.compile(r'trace-alt: triggers (\d+) dropped (\d+) installed-windows (\d+) late-misses (\d+)(?: useful-hits (\d+))?'
+                    r'(?: unused-evicted (\d+))?(?: wait-cycles (\d+))?'
                     r'(?: lines-issued (\d+) line-stalls (\d+))?', re.M)
 RE_CHAIN = re.compile(r'trace-chain: unencodable (\d+) truncated (\d+) buffer-hits (\d+) buffer-evicted-unused (\d+)'
-                      r'(?: filtered (\d+))? slack\(4/8/16/32/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
+                      r'(?: filtered (\d+))?(?: conf-suppressed (\d+))?'
+                      r'(?: evicted-then-missed (\d+) age\(256/1K/4K/16K/inf\): (\d+) (\d+) (\d+) (\d+) (\d+))?'
+                      r' slack\(4/8/16/32/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
 
 RE_UCPPORT = re.compile(r'trace-ucp: cond (\d+) cond-misses (\d+) h2p-marked (\d+) h2p-marked-misses (\d+) paths (\d+) '
                         r'stops\(sat/ind/btbmiss/maxip\): (\d+) (\d+) (\d+) (\d+)(?: ind-walked (\d+))?(?: bank-conflicts (\d+))?', re.M)
@@ -62,6 +67,7 @@ RE_UCP_PREF_HITS = re.compile(r'^hits_from_pref:\s+(\d+)', re.M)
 RE_UCP_H2P_COV = re.compile(r'^h2p_coverage:\s+([\d.]+)', re.M)
 RE_UCP_H2P_ACC = re.compile(r'^h2p_accuracy:\s+([\d.]+)', re.M)
 # standard ChampSim L1I prefetch-traffic line (both printers emit it)
+RE_L1I_TOT = re.compile(r'L1I LOAD\s+ACCESS:\s+(\d+)\s+HIT:\s+(\d+)\s+MISS:\s+(\d+)', re.M)  # LOAD = demand-only (TOTAL includes prefetch accesses)
 RE_L1I_PREF = re.compile(r'L1I PREFETCH\s+REQUESTED:\s+(\d+)\s+ISSUED:\s+(\d+)\s+USEFUL:\s+(\d+)\s+USELESS:\s+(\d+)', re.M)
 
 
@@ -96,6 +102,9 @@ def parse_file(path):
             mu = rx.search(txt)
             if mu:
                 d[key] = cast(mu.group(1))
+    lt = RE_L1I_TOT.search(txt)
+    if lt:
+        d['l1i_access'], d['l1i_miss'] = int(lt.group(1)), int(lt.group(3))
     lp = RE_L1I_PREF.search(txt)
     if lp:
         d['l1i_pref_issued'], d['l1i_pref_useful'] = int(lp.group(2)), int(lp.group(3))
@@ -111,6 +120,9 @@ def parse_file(path):
     ti = RE_TIGHT.search(txt)
     if ti:
         d['ti_steady'], d['ti_recovery'], d['ti_total'] = int(ti.group(1)), int(ti.group(2)), int(ti.group(3))
+    ls = RE_LOST.search(txt)
+    if ls:
+        d['ls_steady'], d['ls_recovery'], d['ls_total'] = int(ls.group(1)), int(ls.group(2)), int(ls.group(3))
 
     stg = RE_STG.search(txt)
     if stg:
@@ -179,15 +191,19 @@ def parse_file(path):
         d['alt_triggers'], d['alt_drops'] = int(al.group(1)), int(al.group(2))
         d['alt_windows'], d['alt_late'] = int(al.group(3)), int(al.group(4))
         d['alt_useful'] = int(al.group(5)) if al.group(5) else None
-        d['alt_wait'] = int(al.group(6)) if al.group(6) else None
-        d['alt_lines'] = int(al.group(7)) if al.group(7) else None
-        d['alt_line_stalls'] = int(al.group(8)) if al.group(8) else None
+        d['alt_unused_evicted'] = int(al.group(6)) if al.group(6) else None
+        d['alt_wait'] = int(al.group(7)) if al.group(7) else None
+        d['alt_lines'] = int(al.group(8)) if al.group(8) else None
+        d['alt_line_stalls'] = int(al.group(9)) if al.group(9) else None
     ch = RE_CHAIN.search(txt)
     if ch:
         d['chain_unenc'], d['chain_trunc'] = int(ch.group(1)), int(ch.group(2))
         d['chain_hits'], d['chain_evict'] = int(ch.group(3)), int(ch.group(4))
         d['chain_filtered'] = int(ch.group(5)) if ch.group(5) else None
-        d['chain_slack'] = [int(ch.group(i)) for i in range(6, 12)]
+        d['chain_conf_suppressed'] = int(ch.group(6)) if ch.group(6) else None
+        d['chain_evicted_missed'] = int(ch.group(7)) if ch.group(7) else None
+        d['chain_evicted_age'] = [int(ch.group(i)) for i in range(8, 13)] if ch.group(7) else None
+        d['chain_slack'] = [int(ch.group(i)) for i in range(13, 19)]
     up2 = RE_UCPPORT.search(txt)
     if up2:
         (d['ucpp_cond'], d['ucpp_cond_miss'], d['ucpp_marked'], d['ucpp_marked_miss'], d['ucpp_paths'],
@@ -270,6 +286,12 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
     print(f"IPC:          arith-mean {amean([r['ipc'] for r in rows]):.4f}   geomean {gmean([r['ipc'] for r in rows]):.4f}")
     print(f"hit rate:     {amean([r['hit'] for r in rows]):.2f}%")
     print(f"switch MPKI:  {amean([r['switch_mpki'] for r in rows]):.3f}")
+    mm = [r for r in rows if r.get('miss_total') and r.get('instrs')]
+    if mm:
+        print(f"muop-$ MPKI:  {amean([1000.0 * r['miss_total'] / r['instrs'] for r in mm]):.1f}")
+    l1 = [r for r in rows if r.get('l1i_miss') is not None and r.get('instrs')]
+    if l1:
+        print(f"L1I MPKI:     {amean([1000.0 * r['l1i_miss'] / r['instrs'] for r in l1]):.3f}")
 
     # per-workload speedup vs a baseline directory (matched by simpoint name)
     if baseline:
@@ -447,6 +469,14 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
         if useful:
             acc = amean([pct(r['alt_useful'], r['alt_windows']) for r in have_alt if r.get('alt_useful') is not None and r['alt_windows']])
             print(f"useful hits:       {amean(useful):,.0f}   (walk accuracy {acc:.1f}% of installed windows)")
+        unused = [r['alt_unused_evicted'] for r in have_alt if r.get('alt_unused_evicted') is not None]
+        if unused:
+            # accuracy over COMPLETED window lifetimes: useful / (useful + evicted-unused);
+            # windows still resident (bit set, not yet hit or evicted) are excluded
+            lacc = amean([pct(r['alt_useful'], r['alt_useful'] + r['alt_unused_evicted']) for r in have_alt
+                          if r.get('alt_useful') is not None and r.get('alt_unused_evicted') is not None
+                          and (r['alt_useful'] + r['alt_unused_evicted'])])
+            print(f"unused evicted:    {amean(unused):,.0f}   (accuracy {lacc:.1f}% of completed window lifetimes)")
         waits = [r['alt_wait'] for r in have_alt if r.get('alt_wait') is not None]
         if waits:
             wpct = amean([pct(r['alt_wait'], r['cycles']) for r in have_alt if r.get('alt_wait') is not None and r['cycles']])
@@ -463,6 +493,22 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
             filt = [r['chain_filtered'] for r in have_chain if r.get('chain_filtered') is not None]
             if filt and amean(filt) > 0:
                 print(f"chain filtered:    {amean(filt):,.0f} windows already resident (not staged)")
+            sup = [r['chain_conf_suppressed'] for r in have_chain if r.get('chain_conf_suppressed') is not None]
+            if sup and amean(sup) > 0:
+                launched = amean([r['alt_triggers'] for r in have_chain])
+                print(f"conf suppressed:   {amean(sup):,.0f} walk launches withheld by launch confidence "
+                      f"({pct(amean(sup), amean(sup) + launched):.1f}% of would-be launches)")
+            etm = [r for r in have_chain if r.get('chain_evicted_missed') is not None]
+            if etm:
+                n_etm = amean([r['chain_evicted_missed'] for r in etm])
+                share = amean([pct(r['chain_evicted_missed'], r['chain_evict']) for r in etm if r['chain_evict']])
+                ages = [amean([r['chain_evicted_age'][i] for r in etm]) for i in range(5)]
+                tot = sum(ages)
+                # short ages (<= a few K cycles) = what a larger FIFO would have held; long ages = the
+                # window's NEXT recurrence (a re-walk's job, not the buffer's)
+                dist = "  ".join(f"{lbl}={100 * v / tot:.0f}%" for lbl, v in zip(['<=256', '<=1K', '<=4K', '<=16K', '>16K'], ages)) if tot else "-"
+                print(f"evicted->missed:   {n_etm:,.0f} demand misses on windows the buffer evicted unused "
+                      f"({share:.1f}% of evicted-unused); eviction->miss age: {dist}")
             sl = [amean([r['chain_slack'][i] for r in have_chain]) for i in range(6)]
             tot = sum(sl)
             if tot > 0:
@@ -502,6 +548,18 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
     print(f"backend-idle (tight):            {ti_abs:,.0f} cycles   ({ti_pct:.2f}% of runtime)")
     print(f"  steady %:                      {ti_ste:.1f}%")
     print(f"  recovery %:                    {ti_rec:.1f}%")
+
+    # lost dispatch slots (top-down middle bound): slots the frontend failed to
+    # fill in build mode while the ROB had room; cycle-equiv = slots / width
+    have_ls = [r for r in have_fe if r.get('ls_total') is not None]
+    if have_ls:
+        ls_abs = amean([r['ls_total'] for r in have_ls])
+        ls_pct = amean([pct(r['ls_total'] / DISPATCH_WIDTH, r['cycles']) for r in have_ls if r['cycles']])
+        ls_ste = amean([pct(r['ls_steady'], r['ls_total']) for r in have_ls if r['ls_total']])
+        ls_rec = amean([pct(r['ls_recovery'], r['ls_total']) for r in have_ls if r['ls_total']])
+        print(f"lost dispatch slots (mid):       {ls_abs:,.0f} slots   ({ls_pct:.2f}% of runtime as cycle-equiv)")
+        print(f"  steady %:                      {ls_ste:.1f}%")
+        print(f"  recovery %:                    {ls_rec:.1f}%")
 
 
 def main():

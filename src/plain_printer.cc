@@ -80,6 +80,11 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
   lines.push_back(fmt::format("{} frontend-loss backend-idle (tight): steady {} recovery {} | total {} ({}% of {} cycles)", stats.name,
                               stats.rob_idle_steady, stats.rob_idle_recovery, rob_idle_total,
                               ::print_ratio(100 * static_cast<long long>(rob_idle_total), stats.cycles()), stats.cycles()));
+  // top-down-style middle bound: dispatch slots left unfilled in BUILD mode
+  // while the ROB had room; cycle-equivalents = slots / dispatch width
+  const auto lost_slots_total = stats.fe_lost_slots_steady + stats.fe_lost_slots_recovery;
+  lines.push_back(fmt::format("{} frontend-loss lost-slots (mid): steady {} recovery {} | total {} slots", stats.name,
+                              stats.fe_lost_slots_steady, stats.fe_lost_slots_recovery, lost_slots_total));
 
   lines.push_back(fmt::format("{} trace-seg: loop {} function {} dedup-hits {} entangled {} dropped: bad-layout {} overflow {} short {} stored-uops {} invariant-violations {}",
                               stats.name, stats.seg_traces_loop, stats.seg_traces_function, stats.seg_traces_dedup, stats.seg_traces_entangled,
@@ -166,15 +171,17 @@ std::vector<std::string> champsim::plain_printer::format(O3_CPU::stats_type stat
     lines.push_back(fmt::format("{} trace-stall top-by-cost avg-len: {}", stats.name, a(stats.stall_cost_avglen)));
   }
 
-  lines.push_back(fmt::format("{} trace-alt: triggers {} dropped {} installed-windows {} late-misses {} useful-hits {} wait-cycles {} lines-issued {} line-stalls {}",
+  lines.push_back(fmt::format("{} trace-alt: triggers {} dropped {} installed-windows {} late-misses {} useful-hits {} unused-evicted {} wait-cycles {} lines-issued {} line-stalls {}",
                               stats.name, stats.alt_triggers, stats.alt_drops, stats.alt_installed_windows, stats.alt_late_misses, stats.alt_useful_hits,
-                              stats.alt_wait_cycles, stats.alt_lines_issued, stats.alt_line_stalls));
+                              stats.alt_pf_evicted_unused, stats.alt_wait_cycles, stats.alt_lines_issued, stats.alt_line_stalls));
   if (stats.alt_walk_aborts > 0) {
     lines.push_back(fmt::format("{} trace-alt WARNING: walk-aborts {}", stats.name, stats.alt_walk_aborts));
   }
-  lines.push_back(fmt::format("{} trace-chain: unencodable {} truncated {} buffer-hits {} buffer-evicted-unused {} filtered {} slack(4/8/16/32/64/inf): {} {} {} {} {} {}",
+  lines.push_back(fmt::format("{} trace-chain: unencodable {} truncated {} buffer-hits {} buffer-evicted-unused {} filtered {} conf-suppressed {} evicted-then-missed {} age(256/1K/4K/16K/inf): {} {} {} {} {} slack(4/8/16/32/64/inf): {} {} {} {} {} {}",
                               stats.name, stats.chain_unencodable, stats.chain_truncated, stats.chain_buf_hits, stats.chain_buf_evict_unused,
-                              stats.chain_filtered_windows, stats.chain_slack[0], stats.chain_slack[1], stats.chain_slack[2], stats.chain_slack[3],
+                              stats.chain_filtered_windows, stats.chain_conf_suppressed, stats.chain_evicted_then_missed,
+                              stats.chain_evicted_age[0], stats.chain_evicted_age[1], stats.chain_evicted_age[2], stats.chain_evicted_age[3],
+                              stats.chain_evicted_age[4], stats.chain_slack[0], stats.chain_slack[1], stats.chain_slack[2], stats.chain_slack[3],
                               stats.chain_slack[4], stats.chain_slack[5]));
   if (stats.ucp_cond_seen > 0) {
     lines.push_back(fmt::format("{} trace-ucp: cond {} cond-misses {} h2p-marked {} h2p-marked-misses {} paths {} stops(sat/ind/btbmiss/maxip): {} {} {} {} ind-walked {} bank-conflicts {}",

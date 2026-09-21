@@ -128,6 +128,9 @@ public:
     // successor lands here, this is the window fragmentation the rule models.
     if (!tag_found) {
       auto victim = std::min_element(set_begin, set_end, [](const entry& a, const entry& b) { return a.last_used < b.last_used; });
+      if (victim->valid && victim->prefetched) {
+        ++pf_evicted_unused_; // walk-installed window evicted without ever being demand-hit
+      }
       victim->tag = t;
       victim->valid = true;
       victim->active = true;
@@ -147,6 +150,12 @@ public:
       }
     }
   }
+
+  // cumulative count of walk-installed windows evicted with the prefetched bit
+  // still set (never demand-hit); mirrored into stats each cycle so the phase
+  // subtraction yields per-phase deltas.  With alt_useful_hits this gives walk
+  // accuracy over completed window lifetimes: useful / (useful + evicted-unused).
+  [[nodiscard]] uint64_t pf_evicted_unused() const { return pf_evicted_unused_; }
 
   // presence check without touching LRU state (used by the alt-trigger walk to
   // skip walks whose target windows are already resident).
@@ -205,6 +214,7 @@ private:
   std::unordered_set<uint64_t> seen_;  // windows ever decoded (IDEAL_COLD_MISS only)
   std::vector<entry> block;
   uint64_t lru_clock = 0;
+  uint64_t pf_evicted_unused_ = 0; // see pf_evicted_unused()
 
   uint64_t tag_of(champsim::address ip) const { return ip.slice_upper(window_shift).to<uint64_t>(); }
 

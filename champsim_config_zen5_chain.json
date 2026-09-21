@@ -58,6 +58,7 @@
       "trace_uop_buffer": 32,
       "trace_probe_ahead": 192,
       "trace_walk_filter": 1,
+      "trace_launch_conf": 0,
       "trace_ucp": 0,
       "trace_ucp_threshold": 500,
       "trace_ucp_max_ip": 64,

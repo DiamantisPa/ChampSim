@@ -69,6 +69,7 @@ struct core_builder_base {
   int m_trace_meta_windows{4};         // chain fill: manifest window slots per trace (entry + 16-bit deltas)
   int m_trace_probe_ahead{0};          // chain fill: deep-probe lead in instructions ahead of enqueue (0 = enqueue only)
   int m_trace_walk_filter{0};          // chain fill: 1 = stage only windows absent from the u-op cache and staging buffer
+  int m_trace_launch_conf{0};          // chain fill: 1 = 2-bit per-trace launch confidence gates walks; 2 = also evicts conf-0 traces first
   int m_trace_ucp{0};                  // UCP port: 1 = alternate-path u-op prefetching on H2P conditionals (ISCA'24)
   int m_trace_ucp_threshold{500};      // UCP: Table-I weighted stop-counter threshold (paper H2P_T)
   int m_trace_ucp_max_ip{64};          // UCP: straight-line steps without a branch before the walk stops
@@ -298,6 +299,14 @@ public:
    * fetch/stage only the absent ones.  Default 0 (entry-window check only).
    */
   self_type& trace_walk_filter(int trace_walk_filter_);
+
+  /**
+   * CHAIN fill mode: per-trace launch confidence (2-bit saturating counter fed
+   * back from the staging buffer: +1 demanded, -1 evicted unused; re-capture
+   * retries a suppressed trace).  0 = off (default), 1 = gate walk launches on
+   * conf > 0, 2 = additionally evict conf-0 traces first.
+   */
+  self_type& trace_launch_conf(int trace_launch_conf_);
 
   /**
    * UCP port (ISCA'24): alternate-path u-op cache prefetching on hard-to-predict
@@ -733,6 +742,13 @@ template <typename B, typename T>
 auto champsim::core_builder<B, T>::trace_ucp_altind(int trace_ucp_altind_) -> self_type&
 {
   m_trace_ucp_altind = trace_ucp_altind_;
+  return *this;
+}
+
+template <typename B, typename T>
+auto champsim::core_builder<B, T>::trace_launch_conf(int trace_launch_conf_) -> self_type&
+{
+  m_trace_launch_conf = trace_launch_conf_;
   return *this;
 }
 

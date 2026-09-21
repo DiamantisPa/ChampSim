@@ -61,6 +61,7 @@ long O3_CPU::operate()
   sim_stats.store_occupancy = fill_store.size();
   sim_stats.store_win_added = fill_store.windows_added();
   sim_stats.store_win_shared = fill_store.windows_shared();
+  sim_stats.alt_pf_evicted_unused = DIB.pf_evicted_unused();
 
   return progress;
 }
@@ -444,7 +445,7 @@ void O3_CPU::drain_alt_walks()
         if (fill_mode == fill_mode_type::CHAIN && uop_buffer_windows > 0 && !w.ucp) {
           // CHAIN: stage into the trace-uop buffer (no u-op-cache pollution);
           // demand hits promote from there
-          uop_buffer_push(w.windows[w.idx], w.probe_time);
+          uop_buffer_push(w.windows[w.idx], w.probe_time, w.entry);
           ++sim_stats.alt_installed_windows;
         } else {
           sim_stats.alt_installed_windows += DIB.install(w.windows[w.idx], /*prefetch=*/true);
@@ -581,6 +582,10 @@ void O3_CPU::do_chain_trigger(const std::vector<uint64_t>& ips)
     if (groups.empty()) {
       return; // fully resident: nothing to walk (not a drop, not a trigger)
     }
+  }
+  if (chain_launch_conf > 0 && fill_store.conf_of(entry) == 0) {
+    ++sim_stats.chain_conf_suppressed; // this trace's staged windows keep dying unused: hold the walk until it is re-captured
+    return;
   }
   if (alt_walks.size() >= alt_walk_max) {
     ++sim_stats.alt_drops;
@@ -855,20 +860,33 @@ void O3_CPU::do_ucp_trigger(uint64_t h2p_ip, const std::vector<uint64_t>& ips)
 // CHAIN staging buffer: FIFO of pre-decoded windows awaiting demand.  A refresh
 // of a resident tag replaces it; capacity eviction discards the oldest window
 // (counted as overshoot if it was never demanded -- hits erase their entry).
-void O3_CPU::uop_buffer_push(const std::vector<uint64_t>& window_ips, champsim::chrono::clock::time_point probe_time)
+void O3_CPU::uop_buffer_push(const std::vector<uint64_t>& window_ips, champsim::chrono::clock::time_point probe_time, uint64_t origin)
 {
   const uint64_t tag = window_ips.front() >> dib_window_bits;
   if (auto it = std::find_if(std::begin(uop_buffer), std::end(uop_buffer), [tag](const auto& e) { return e.tag == tag; });
       it != std::end(uop_buffer)) {
     it->ips = window_ips; // refresh
     it->probe_time = probe_time;
+    it->origin = origin;
     return;
   }
   while (uop_buffer.size() >= static_cast<std::size_t>(uop_buffer_windows)) {
+    if (chain_launch_conf > 0) {
+      fill_store.conf_miss(uop_buffer.front().origin); // staged, never demanded: the launching trace loses confidence
+    }
+    uop_buf_evict_log.emplace_back(uop_buffer.front().tag, current_time);
+    uop_buf_evict_map[uop_buffer.front().tag] = current_time;
+    while (uop_buf_evict_log.size() > UOP_BUF_EVICT_LOG) {
+      const auto& [old_tag, old_time] = uop_buf_evict_log.front();
+      if (auto mit = uop_buf_evict_map.find(old_tag); mit != std::end(uop_buf_evict_map) && mit->second == old_time) {
+        uop_buf_evict_map.erase(mit); // only drop the map entry if no later eviction of the same tag superseded it
+      }
+      uop_buf_evict_log.pop_front();
+    }
     uop_buffer.pop_front();
     ++sim_stats.chain_buf_evict_unused; // anything still resident was never demanded
   }
-  uop_buffer.push_back({tag, window_ips, probe_time});
+  uop_buffer.push_back({tag, window_ips, probe_time, origin});
 }
 
 // wait-eligible variant: the walk holding the window, or nullptr -- background
@@ -1136,15 +1154,30 @@ void O3_CPU::do_check_dib(ooo_model_instr& instr)
       const std::size_t bucket = (slack <= 4) ? 0 : (slack <= 8) ? 1 : (slack <= 16) ? 2 : (slack <= 32) ? 3 : (slack <= 64) ? 4 : 5;
       ++sim_stats.chain_slack[bucket];
       DIB.install(bit->ips, /*prefetch=*/false); // promote: demand-class fill at MRU
+      if (chain_launch_conf > 0) {
+        fill_store.conf_hit(bit->origin); // staged window demanded: the launching trace gains confidence
+      }
       uop_buffer.erase(bit);
-    } else if (alt_walk_wait_mode != 0) {
-      if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr && walk_wait_worthwhile(holder, rawip)) {
-        if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
-          ++instr.dib_wait_cycles;
-          ++sim_stats.alt_wait_cycles;
-          return; // walk in flight: hit-under-fill
+    } else {
+      // buffer miss: was this window staged and then evicted unused?  Then a
+      // larger FIFO would have served it -- count it once and record how long
+      // after the eviction the demand arrived (the residency the FIFO lacked).
+      if (auto mit = uop_buf_evict_map.find(wtag); mit != std::end(uop_buf_evict_map)) {
+        ++sim_stats.chain_evicted_then_missed;
+        const auto age = (current_time - mit->second) / clock_period;
+        const std::size_t ab = (age <= 256) ? 0 : (age <= 1024) ? 1 : (age <= 4096) ? 2 : (age <= 16384) ? 3 : 4;
+        ++sim_stats.chain_evicted_age[ab];
+        uop_buf_evict_map.erase(mit);
+      }
+      if (alt_walk_wait_mode != 0) {
+        if (alt_walk* holder = alt_pending_walk(rawip); holder != nullptr && walk_wait_worthwhile(holder, rawip)) {
+          if (alt_walk_wait_cap == 0 || instr.dib_wait_cycles < alt_walk_wait_cap) {
+            ++instr.dib_wait_cycles;
+            ++sim_stats.alt_wait_cycles;
+            return; // walk in flight: hit-under-fill
+          }
+          holder->background = true;
         }
-        holder->background = true;
       }
     }
   }
@@ -1604,6 +1637,19 @@ long O3_CPU::dispatch_instruction()
   // steady:  fe_stall_* = ROB had room (dispatch starvation, upper bound on IPC
   // loss); rob_idle_* = ROB fully empty (backend idle, tight lower bound that
   // reconciles with the real->ideal gap).
+  // frontend-lost dispatch SLOTS (top-down style, the middle bound): dispatch
+  // bandwidth left unused in BUILD mode while the backend could have accepted
+  // more (ROB has room) and the front end had nothing ready -- counts partial
+  // shortfall cycles the zero-dispatch starve bound misses.
+  if (fetch_mode == fetch_mode_type::BUILD && available_dispatch_bandwidth.has_remaining() && std::size(ROB) != ROB_SIZE
+      && (std::empty(DISPATCH_BUFFER) || DISPATCH_BUFFER.front().ready_time > current_time)) {
+    const auto lost = static_cast<uint64_t>(available_dispatch_bandwidth.amount_remaining());
+    if (in_recovery) {
+      sim_stats.fe_lost_slots_recovery += lost;
+    } else {
+      sim_stats.fe_lost_slots_steady += lost;
+    }
+  }
   if (available_dispatch_bandwidth.amount_consumed() == 0 && fetch_mode == fetch_mode_type::BUILD
       && (std::empty(DISPATCH_BUFFER) || DISPATCH_BUFFER.front().ready_time > current_time)) {
     if (std::size(ROB) != ROB_SIZE) {

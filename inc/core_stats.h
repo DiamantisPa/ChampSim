@@ -85,6 +85,7 @@ struct cpu_stats {
   uint64_t alt_installed_windows = 0; // u-op-cache windows installed by walks
   uint64_t alt_late_misses = 0;       // demand misses whose window was in a walk still in flight (too slow)
   uint64_t alt_useful_hits = 0;       // demand hits on walk-installed windows (walk accuracy numerator)
+  uint64_t alt_pf_evicted_unused = 0; // walk-installed windows evicted never demand-hit (accuracy denominator with useful)
   uint64_t alt_wait_cycles = 0;       // fetch-stall cycles waiting for a walk-pending window (hit-under-fill)
   uint64_t alt_lines_issued = 0;      // real-L1I mode: cache-line reads the walks issued through the L1I
   uint64_t alt_line_stalls = 0;       // real-L1I mode: walk-cycles stalled waiting for a line to arrive
@@ -95,6 +96,9 @@ struct cpu_stats {
   uint64_t chain_buf_hits = 0;          // demand hits served from the trace-uop buffer (then promoted)
   uint64_t chain_buf_evict_unused = 0;  // buffer windows evicted without ever being demanded (walk overshoot)
   uint64_t chain_filtered_windows = 0;  // windows skipped at walk launch (already u-op-cache-resident or staged)
+  uint64_t chain_conf_suppressed = 0;   // walk launches withheld by the per-trace launch confidence (trace_launch_conf)
+  uint64_t chain_evicted_then_missed = 0;     // demand misses on windows the staging buffer had evicted unused
+  std::array<uint64_t, 5> chain_evicted_age{}; // ...by eviction->miss age: <=256, <=1K, <=4K, <=16K, >16K cycles (short = FIFO-capacity opportunity, long = next recurrence)
   std::array<uint64_t, 6> chain_slack{}; // probe->first-demand-touch cycles: <=4, <=8, <=16, <=32, <=64, >64
   // UCP port (alternate-path u-op prefetching on H2P conditionals):
   uint64_t ucp_cond_seen = 0;          // conditional branches observed (H2P detector denominator base)
@@ -112,6 +116,8 @@ struct cpu_stats {
   uint64_t fe_stall_recovery = 0;  // build-mode dispatch-starvation cycles, post-misprediction (upper bound)
   uint64_t rob_idle_steady = 0;    // build-mode cycles with ROB fully empty, correct path (tight lower bound)
   uint64_t rob_idle_recovery = 0;  // build-mode cycles with ROB fully empty, post-misprediction (tight lower bound)
+  uint64_t fe_lost_slots_steady = 0;   // build-mode dispatch SLOTS lost while ROB had room, correct path (top-down middle bound)
+  uint64_t fe_lost_slots_recovery = 0; // build-mode dispatch SLOTS lost while ROB had room, post-misprediction
 
   // trace segmentation (see inc/trace_segmenter.h)
   uint64_t seg_traces_loop = 0;              // stored traces triggered by backward branches

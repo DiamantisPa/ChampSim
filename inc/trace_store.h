@@ -113,6 +113,9 @@ public:
       entries[slot].ips = ips;
       entries[slot].lru = ++tick;
       entries[slot].cost = cost;
+      if (entries[slot].conf == 0) {
+        entries[slot].conf = 1; // re-captured: retry a suppressed launch
+      }
       if (window_indexed) {
         add_windows(slot);
       }
@@ -164,13 +167,45 @@ public:
     }
   }
 
-  // refresh a resident trace's accumulated stall cost (on re-capture)
+  // refresh a resident trace's accumulated stall cost (on re-capture).  A
+  // re-capture is fresh evidence the stretch still stalls the ROB, so a
+  // launch-suppressed trace (conf 0) gets one retry (conf 1).
   void update_cost(uint64_t entry, uint64_t cost)
   {
     if (auto it = entry_index.find(entry); it != entry_index.end()) {
       entries[it->second].cost = clamp_cost(cost);
+      if (entries[it->second].conf == 0) {
+        entries[it->second].conf = 1;
+      }
     }
   }
+
+  // launch confidence (trace_launch_conf): 2-bit saturating counter per trace,
+  // fed back from the staging buffer -- +1 when a staged window is demanded,
+  // -1 when it is evicted unused.  conf 0 = do not launch this trace's walk.
+  static constexpr uint8_t CONF_INIT = 2;
+  static constexpr uint8_t CONF_MAX = 3;
+  void conf_hit(uint64_t entry)
+  {
+    if (auto it = entry_index.find(entry); it != entry_index.end() && entries[it->second].conf < CONF_MAX) {
+      ++entries[it->second].conf;
+    }
+  }
+  void conf_miss(uint64_t entry)
+  {
+    if (auto it = entry_index.find(entry); it != entry_index.end() && entries[it->second].conf > 0) {
+      --entries[it->second].conf;
+    }
+  }
+  [[nodiscard]] int conf_of(uint64_t entry) const
+  {
+    auto it = entry_index.find(entry);
+    return (it == entry_index.end()) ? -1 : static_cast<int>(entries[it->second].conf);
+  }
+  // conf-aware eviction: a conf-0 trace is the first-choice victim, ahead of
+  // the LRU / min-cost compare
+  void set_conf_evict(bool on) { conf_evict = on; }
+  [[nodiscard]] bool conf_policy() const { return conf_evict; }
 
   // lookup by trace entry PC (used by "miss" and "every" fill modes)
   const std::vector<uint64_t>* lookup_entry(uint64_t ip)
@@ -210,6 +245,7 @@ private:
     uint64_t cost = 0;             // accumulated ROB-stall cycles of the trace (cost-aware eviction)
     std::vector<uint64_t> windows; // distinct window keys (only if window_indexed)
     bool valid = false;            // slot occupancy (pre-sized set-associative array)
+    uint8_t conf = CONF_INIT;      // launch confidence (trace_launch_conf); fresh traces start weakly confident
   };
 
   static std::size_t env_capacity()
@@ -226,6 +262,16 @@ private:
   {
     std::size_t v = begin;
     for (std::size_t i = begin + 1; i < end; ++i) {
+      if (conf_evict) {
+        const bool dead_i = entries[i].conf == 0;
+        const bool dead_v = entries[v].conf == 0;
+        if (dead_i != dead_v) {
+          if (dead_i) {
+            v = i;
+          }
+          continue; // a conf-0 trace always loses to a live one
+        }
+      }
       if (cost_evict) {
         if (entries[i].cost < entries[v].cost || (entries[i].cost == entries[v].cost && entries[i].lru < entries[v].lru)) {
           v = i;
@@ -307,6 +353,7 @@ private:
   [[nodiscard]] uint64_t clamp_cost(uint64_t c) const { return (cost_cap > 0 && c > cost_cap) ? cost_cap : c; }
 
   bool cost_evict = false;
+  bool conf_evict = false;   // trace_launch_conf mode 2: conf-0 traces evicted first
   bool xor_hash = false;
   uint64_t cost_cap = 0;     // saturating cost ceiling (0 = unbounded idealized counter)
   uint64_t decay_period = 0; // cost halving interval in insertions (0 = off)

@@ -19,8 +19,8 @@ DATA = {
                      chain=4.643, n=76),
     "Google": dict(sweep=[0.278, 0.318, 0.410, 0.446, 0.505], ideal=6.107,
                    chain=1.279, n=43),
-    "CVP-1": dict(sweep=[2.994, 3.553, 4.216, 4.488, 4.727], ideal=10.216,
-                  chain=4.730, n=143),
+    "CVP-1": dict(sweep=[2.955, 3.505, 4.149, 4.415, 4.648], ideal=10.448,
+                  chain=4.552, n=143),  # wrap-free W50+I100
 }
 
 HUES = {"Qualcomm": "#2a78d6", "Google": "#eb6834", "CVP-1": "#1baf7a"}

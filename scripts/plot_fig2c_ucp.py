@@ -17,7 +17,7 @@ CAPS = [6, 8, 12, 16, 24]  # K u-ops
 DATA = {
     "Qualcomm": dict(sweep=[0.927, 1.118, 1.472, 1.703, 1.982], ucp=2.450, n=76),
     "Google": dict(sweep=[0.278, 0.318, 0.410, 0.446, 0.505], ucp=2.229, n=43),
-    "CVP-1": dict(sweep=[2.994, 3.553, 4.216, 4.488, 4.727], ucp=3.756, n=143),
+    "CVP-1": dict(sweep=[2.955, 3.505, 4.149, 4.415, 4.648], ucp=3.870, n=143),  # wrap-free W50+I100
 }
 
 HUES = {"Qualcomm": "#2a78d6", "Google": "#eb6834", "CVP-1": "#1baf7a"}
