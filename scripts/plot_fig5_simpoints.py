@@ -5,7 +5,7 @@ Left: geomean IPC speedup over the matched 6K baseline per suite (computed
 from the same per-simpoint ratios as the right panel).
 Right: one dot per simpoint, sorted ascending per suite/mechanism;
 x = simpoint percentile (unlabeled) so suites of different sizes share one
-axis; trPref = filled dots, UCP = x marks.
+axis; SUCP = filled dots, UCP = x marks.
 
 Data: the per-workload scatter output of aggregate_results.py.  For each
 suite and mechanism, generate one file with e.g.
@@ -33,7 +33,7 @@ from matplotlib.patches import Patch
 DATA_DIR = sys.argv[1] if len(sys.argv) > 1 else "results/scatter"
 
 SUITES = [("qualcomm", "Qualcomm"), ("google", "Google"), ("cvp", "CVP-1")]
-MECHS = [("ucp", "+ UCP"), ("trpref", "+ trace prefetch")]
+MECHS = [("ucp", "+ UCP"), ("trpref", "+ SUCP")]
 
 RE_ROW = re.compile(r'^\s+\S+\s+([+-]?\d+(?:\.\d+)?)%\s+ipc\s', re.M)
 
@@ -64,6 +64,7 @@ INK_2ND = "#52514e"
 MUTED = "#898781"
 GRID = "#e1e0d9"
 BASELINE = "#c3c2b7"
+SUCP_COLOR = "#f39c34"  # light orange: highlights our mechanism's labels
 
 plt.rcParams.update({
     "font.size": 8,
@@ -100,9 +101,12 @@ axg.set_xlim(-0.6, len(DATA) - 1 + 0.6)
 axg.set_xticks(range(len(DATA)))
 axg.set_xticklabels(list(DATA.keys()), fontsize=7, color=INK)
 axg.set_ylabel("Geomean speedup (%)", fontsize=7.5, color=INK)
+_gms = [geomean_pct(DATA[s][m]) for s in DATA for m, _ in MECHS if DATA[s][m] is not None]
+if _gms:
+    axg.set_ylim(min(0.0, min(_gms) * 1.3), max(_gms) * 1.35)  # headroom: value labels clear the legend
 axg.axhline(0, color=BASELINE, linewidth=0.6, zorder=2)
-axg.legend(handles=[
-    Patch(facecolor=INK_2ND, label="+ trace prefetch"),
+leg_g = axg.legend(handles=[
+    Patch(facecolor=INK_2ND, label="+ SUCP"),
     Patch(facecolor="#b9b7b0", hatch="////", edgecolor=INK_2ND, linewidth=0.6,
           label="+ UCP"),
 ], fontsize=6.0, frameon=False, loc="upper right", handlelength=1.2,
@@ -132,13 +136,20 @@ suite_handles = [Line2D([], [], color=h, marker="s", linestyle="none",
                         markersize=4, label=s) for s, h in zip(DATA, HUES)]
 style_handles = [
     Line2D([], [], color=INK_2ND, marker="o", linestyle="none", markersize=4,
-           label="trace prefetch"),
+           label="SUCP"),
     Line2D([], [], markeredgecolor=INK_2ND, marker="x", linestyle="none",
            markersize=4, markeredgewidth=0.9, label="UCP"),
 ]
-axs.legend(handles=suite_handles + style_handles, fontsize=6.0, frameon=False,
+leg_s = axs.legend(handles=suite_handles + style_handles, fontsize=6.0, frameon=False,
            loc="upper left", ncol=2, handlelength=1.6, handletextpad=0.5,
            borderaxespad=0.2, labelspacing=0.35, columnspacing=1.0)
+
+for leg in (leg_g, leg_s):
+    for t in leg.get_texts():
+        if "SUCP" in t.get_text():
+            t.set_fontproperties(t.get_fontproperties().copy())  # legend texts share one FontProperties
+            t.set_color(SUCP_COLOR)
+            t.set_fontweight("bold")
 
 for ax in (axg, axs):
     ax.yaxis.set_tick_params(labelsize=6.5, colors=MUTED, width=0.6)

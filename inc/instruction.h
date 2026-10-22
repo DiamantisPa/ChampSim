@@ -102,6 +102,34 @@ struct ooo_model_instr : champsim::program_ordered<ooo_model_instr> {
   bool branch_taken = false;
   bool branch_prediction = false;
   bool branch_mispredicted = false; // A branch can be mispredicted even if the direction prediction is correct when the predicted target is not correct
+  // the predictor's answer for this instruction (BTB target, always-taken, UCP H2P
+  // flag), kept so fetch can reuse a prediction made earlier at the deep-probe
+  // cursor (trace_wrong_path >= 1) instead of predicting again
+  bool early_predicted = false;
+  bool pred_wrong = false; // the prediction for this branch was wrong (set in warmup too; branch_mispredicted is ROI-only)
+  bool pred_always_taken = false;
+  bool pred_h2p = false;
+  uint64_t pred_btb_target = 0;
+  uint64_t vp_ctx = 0; // trace_vpred: sequence number of the last branch prediction before this instruction
+  bool uop_miss = false; // the u-op-cache lookup missed (miss-cost profile)
+  bool fetch_block_start = false; // fetch_buffer_blocks: first instruction of a fetch block taken from the FTQ
+  bool retain_costly = false;     // uop_retain: its u-op-cache miss starved the backend before its window was built
+  uint32_t tax_starve_tight = 0; // stall taxonomy: empty-ROB build-mode cycles dispatch waited on this u-op-cache miss
+  uint32_t tax_starve_upper = 0; // ...cycles the ROB had room
+  bool tax_recovery = false;     // ...the first such cycle fell in misprediction recovery
+  bool tax_first_touch = false;  // its window had never been looked up before (warmup included)
+  uint32_t tax_fetch_lat = 0;    // its demand L1I fetch, issue to return (cycles); 0 = no demand fetch returned
+  uint64_t rp_key = 0;           // resteer prefetcher: trigger (line of the mispredicted branch) whose resteer path holds it
+  bool rp_recorded = false;      // ...its line was filed as a prefetch target
+  bool emissary_done = false;    // EMISSARY: its L1I miss was already considered for marking
+  bool emissary_pending = false;  // ...selected; mark the line when it arrives
+  bool rtt_walked = false;        // its prediction launched a recovery-trace walk (rtt_cancel)
+  uint64_t rtt_key = 0;           // the trace its prediction looked up (rtt_conf_min: trained at resolution)
+  bool pre_miss = false; // ftq_lookup_window: its window was not in the u-op cache when the block entered the FTQ (FDIP requests the line)
+  uint8_t trig_probe = 0;        // trace_trigger_diag: best outcome of the cursor's probes of this pc as a trace entry (O3_CPU::TRIG_*)
+  uint64_t trig_probe_cycle = 0; // ...and the cycle of that probe
+  uint8_t trig_class = 0;        // trace_trigger_diag: why this u-op-cache miss was not served (O3_CPU::TD_*)
+  uint8_t trig_head = 0;         // trace_trigger_diag: ...and why the first miss of its miss run was not served
 
   std::array<uint8_t, 2> asid = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
 

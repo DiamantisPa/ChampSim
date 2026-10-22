@@ -53,8 +53,8 @@ ax.set_xlim(5.4, 31)
 ax.set_xticks(CAPS)
 ax.set_xticklabels([f"{c}K" for c in CAPS], fontsize=7)
 ax.minorticks_off()
-ax.set_xlabel("µ-op cache capacity (µ-ops)", fontsize=8, color=INK)
-ax.set_ylabel("Geomean speedup\nover no µ-op cache (%)", fontsize=8, color=INK,
+ax.set_xlabel("uop cache capacity (uops)", fontsize=8, color=INK)
+ax.set_ylabel("Geomean speedup\nover no uop cache (%)", fontsize=8, color=INK,
               linespacing=1.2)
 ax.set_ylim(0, 5.4)
 ax.set_yticks([0, 1, 2, 3, 4, 5])

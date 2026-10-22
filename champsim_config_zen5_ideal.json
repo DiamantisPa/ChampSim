@@ -56,6 +56,7 @@
       "trace_tail_targets": 3,
       "trace_uop_buffer": 16,
       "trace_probe_ahead": 128,
+      "trace_wrong_path": 0,
       "trace_walk_filter": 1,
       "trace_ucp": 0,
       "trace_ucp_threshold": 500,

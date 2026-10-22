@@ -94,13 +94,15 @@ auto CACHE::operator=(CACHE&& other) -> CACHE&
 
 CACHE::tag_lookup_type::tag_lookup_type(const request_type& req, bool local_pref, bool skip)
     : address(req.address), v_address(req.v_address), data(req.data), ip(req.ip), instr_id(req.instr_id), pf_metadata(req.pf_metadata), cpu(req.cpu),
-      type(req.type), prefetch_from_this(local_pref), skip_fill(skip), is_translated(req.is_translated), instr_depend_on_me(req.instr_depend_on_me)
+      type(req.type), prefetch_from_this(local_pref), skip_fill(skip), is_translated(req.is_translated), is_instr(req.is_instr),
+      no_fill(req.no_fill), walker(req.walker), instr_depend_on_me(req.instr_depend_on_me)
 {
 }
 
 CACHE::fill_type::fill_type(const tag_lookup_type& req, champsim::chrono::clock::time_point _time_enqueued)
     : address(req.address), v_address(req.v_address), ip(req.ip), instr_id(req.instr_id), cpu(req.cpu), type(req.type),
-      prefetch_from_this(req.prefetch_from_this), time_enqueued(_time_enqueued), instr_depend_on_me(req.instr_depend_on_me), to_return(req.to_return)
+      prefetch_from_this(req.prefetch_from_this), no_fill(req.no_fill), time_enqueued(_time_enqueued), instr_depend_on_me(req.instr_depend_on_me),
+      to_return(req.to_return)
 {
 }
 
@@ -122,6 +124,7 @@ CACHE::fill_type CACHE::fill_type::merge(fill_type predecessor, fill_type succes
   retval.instr_depend_on_me = merged_instr;
   retval.to_return = merged_return;
   retval.data_promise = predecessor.data_promise;
+  retval.no_fill = predecessor.no_fill && successor.no_fill; // a merged demand/prefetch request still allocates
 
   if constexpr (champsim::debug_print) {
     if (successor.type == access_type::PREFETCH) {
@@ -170,11 +173,38 @@ bool CACHE::handle_fill(const fill_type& fill)
 {
   cpu = fill.cpu;
 
+  if (fill.no_fill) {
+    // non-allocating read: hand the data up, allocate nothing, update no replacement/prefetcher state
+    response_type response{fill.address, fill.v_address, fill.data_promise->data, fill.data_promise->pf_metadata, fill.instr_depend_on_me};
+    for (auto* ret : fill.to_return) {
+      ret->push_back(response);
+    }
+    return true;
+  }
+
   // find victim
   auto [set_begin, set_end] = get_set_span(fill.address);
   auto way = std::find_if_not(set_begin, set_end, [](auto x) { return x.valid; });
   if (way == set_end) {
     way = std::next(set_begin, impl_find_victim(fill.cpu, fill.instr_id, get_set_index(fill.address), &*set_begin, fill.ip, fill.address, fill.type));
+    // EMISSARY P(N): while at most N lines of the set are high-priority, evict the LRU low-priority
+    // line; above N, the LRU high-priority line
+    if (emissary_ways > 0 && way != set_end) {
+      const auto n_high = static_cast<std::size_t>(std::count_if(set_begin, set_end, [](const auto& x) { return x.valid && x.priority; }));
+      auto pick = set_end;
+      for (auto it = set_begin; it != set_end; ++it) {
+        const bool eligible = (n_high > emissary_ways) ? it->priority : !it->priority;
+        if (eligible && (pick == set_end || it->lru_stamp < pick->lru_stamp)) {
+          pick = it;
+        }
+      }
+      if (pick != set_end) {
+        if (pick != way) {
+          ++emissary_diverted;
+        }
+        way = pick;
+      }
+    }
   }
   assert(set_begin <= way);
   assert(way <= set_end);
@@ -228,7 +258,13 @@ bool CACHE::handle_fill(const fill_type& fill)
       ++sim_stats.pf_fill;
     }
 
+    if (way->valid && way->priority) {
+      ++emissary_prot_evicted;
+    }
     *way = fill_block(fill, metadata_thru);
+    if (emissary_ways > 0) {
+      way->lru_stamp = ++emissary_clock_;
+    }
   }
 
   // COLLECT STATS
@@ -261,6 +297,17 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
   }
 
   auto metadata_thru = handle_pkt.pf_metadata;
+  if (handle_pkt.no_fill) {
+    // non-allocating read: return the data on a hit, touch no state (prefetcher, replacement, prefetch bits)
+    if (hit) {
+      sim_stats.hits.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
+      response_type response{handle_pkt.address, handle_pkt.v_address, way->data, metadata_thru, handle_pkt.instr_depend_on_me};
+      for (auto* ret : handle_pkt.to_return) {
+        ret->push_back(response);
+      }
+    }
+    return hit;
+  }
   if (should_activate_prefetcher(handle_pkt)) {
     metadata_thru = impl_prefetcher_cache_operate(module_address(handle_pkt), handle_pkt.ip, hit, useful_prefetch, handle_pkt.type, metadata_thru);
   }
@@ -269,6 +316,27 @@ bool CACHE::try_hit(const tag_lookup_type& handle_pkt)
   const auto way_idx = std::distance(set_begin, way);
   impl_update_replacement_state(handle_pkt.cpu, get_set_index(handle_pkt.address), way_idx, module_address(handle_pkt), handle_pkt.ip, {}, handle_pkt.type,
                                 hit);
+
+  if (hit && emissary_ways > 0) {
+    way->lru_stamp = ++emissary_clock_;
+  }
+
+  // perfect_instr ceiling: an instruction line that misses here is served at this level's latency
+  // anyway (no fill, no capacity used) -- 1: only if requested before, 2: always
+  bool oracle_hit = false;
+  if (perfect_instr != 0 && handle_pkt.is_instr) {
+    const bool seen = !instr_seen_.insert(champsim::block_number{handle_pkt.address}.to<uint64_t>()).second;
+    oracle_hit = !hit && (perfect_instr == 2 || seen);
+  }
+  if (oracle_hit) {
+    ++perfect_instr_hits;
+    sim_stats.hits.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
+    response_type response{handle_pkt.address, handle_pkt.v_address, handle_pkt.data, metadata_thru, handle_pkt.instr_depend_on_me};
+    for (auto* ret : handle_pkt.to_return) {
+      ret->push_back(response);
+    }
+    return true;
+  }
 
   if (hit) {
     sim_stats.hits.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
@@ -307,6 +375,8 @@ auto CACHE::mshr_and_forward_packet(const tag_lookup_type& handle_pkt) -> std::p
   fwd_pkt.data = handle_pkt.data;
   fwd_pkt.instr_id = handle_pkt.instr_id;
   fwd_pkt.ip = handle_pkt.ip;
+  fwd_pkt.is_instr = handle_pkt.is_instr || is_instr_cache_;
+  fwd_pkt.no_fill = handle_pkt.no_fill && !(is_instr_cache_ && nofill_instr_only) && !handle_pkt.walker; // a walker read allocates below
 
   fwd_pkt.instr_depend_on_me = handle_pkt.instr_depend_on_me;
   fwd_pkt.response_requested = (!handle_pkt.prefetch_from_this || !handle_pkt.skip_fill);
@@ -332,6 +402,15 @@ bool CACHE::handle_miss(const tag_lookup_type& handle_pkt)
   auto fill_entry = std::find_if(std::begin(MSHR), std::end(MSHR), matches_address(handle_pkt.address));
   bool mshr_full = (MSHR.size() == MSHR_SIZE);
 
+  // a walker MSHR already holds this line: merge (a demand merging in makes it allocate here on return)
+  if (fill_entry == MSHR.end()) {
+    if (auto wit = std::find_if(std::begin(walker_mshr), std::end(walker_mshr), matches_address(handle_pkt.address)); wit != std::end(walker_mshr)) {
+      sim_stats.miss_merge.increment(std::pair{to_allocate.type, to_allocate.cpu});
+      *wit = fill_type::merge(*wit, to_allocate);
+      sim_stats.misses.increment(std::pair{handle_pkt.type, handle_pkt.cpu});
+      return true;
+    }
+  }
   // check inflight fills
   if (fill_entry == MSHR.end()) {
     fill_entry = std::find_if(inflight_fills.begin(), inflight_fills.end(), matches_address(handle_pkt.address));
@@ -350,6 +429,13 @@ bool CACHE::handle_miss(const tag_lookup_type& handle_pkt)
     sim_stats.miss_merge.increment(std::pair{to_allocate.type, to_allocate.cpu});
 
     *fill_entry = fill_type::merge(*fill_entry, to_allocate);
+  } else if (handle_pkt.walker) {
+    // walk line miss: its own MSHR file, never a regular MSHR (FDIP and demand keep those)
+    if (!lower_level->add_rq(mshr_pkt.second)) {
+      return false;
+    }
+    walker_mshr.emplace_back(std::move(mshr_pkt.first));
+    walker_mshr_peak = std::max<uint64_t>(walker_mshr_peak, walker_mshr.size());
   } else {
     if (mshr_full) { // not enough MSHR resource
       return false;  // TODO should we allow prefetches anyway if they will not be filled to this level?
@@ -417,6 +503,12 @@ auto CACHE::initiate_tag_check(champsim::channel* ul)
 long CACHE::operate()
 {
   long progress{0};
+
+  if (!registered_) {
+    registered_ = true;
+    is_instr_cache_ = (NAME.find("L1I") != std::string::npos);
+    live_caches().push_back(this);
+  }
 
   auto is_ready = [time = current_time](const auto& entry) {
     return entry.event_cycle <= time;
@@ -541,6 +633,55 @@ auto CACHE::get_set_span(champsim::address address) -> std::pair<set_type::itera
   return get_span(std::begin(block), static_cast<set_type::difference_type>(set_idx), NUM_WAY); // safe cast because of prior assert
 }
 
+std::vector<CACHE*>& CACHE::live_caches()
+{
+  static std::vector<CACHE*> caches;
+  return caches;
+}
+
+CACHE* CACHE::find_live(const std::string& name)
+{
+  auto it = std::find_if(std::begin(live_caches()), std::end(live_caches()), [&name](const CACHE* c) { return c->NAME == name; });
+  return (it == std::end(live_caches())) ? nullptr : *it;
+}
+
+bool CACHE::mark_priority_virtual(champsim::address v_addr, champsim::address& p_addr)
+{
+  auto [set_begin, set_end] = get_set_span(v_addr);
+  const champsim::block_number blk{v_addr};
+  auto way = std::find_if(set_begin, set_end, [blk](const auto& x) { return x.valid && champsim::block_number{x.v_address} == blk; });
+  if (way == set_end) {
+    return false;
+  }
+  if (!way->priority) {
+    way->priority = true;
+    ++emissary_marks;
+  }
+  p_addr = way->address;
+  return true;
+}
+
+bool CACHE::mark_priority_physical(champsim::address p_addr)
+{
+  auto [set_begin, set_end] = get_set_span(p_addr);
+  auto way = std::find_if(set_begin, set_end, [matcher = matches_address(p_addr)](const auto& x) { return x.valid && matcher(x); });
+  if (way == set_end) {
+    return false;
+  }
+  if (!way->priority) {
+    way->priority = true;
+    ++emissary_marks;
+  }
+  return true;
+}
+
+bool CACHE::has_virtual_block(champsim::address v_addr) const
+{
+  auto [set_begin, set_end] = get_set_span(v_addr);
+  const champsim::block_number blk{v_addr};
+  return std::any_of(set_begin, set_end, [blk](const auto& x) { return x.valid && champsim::block_number{x.v_address} == blk; });
+}
+
 auto CACHE::get_set_span(champsim::address address) const -> std::pair<set_type::const_iterator, set_type::const_iterator>
 {
   const auto set_idx = get_set_index(address);
@@ -607,6 +748,17 @@ void CACHE::finish_packet(const response_type& packet)
 {
   // check MSHR information
   auto mshr_entry = std::find_if(std::begin(MSHR), std::end(MSHR), matches_address(packet.address));
+
+  if (mshr_entry == MSHR.end()) {
+    // a walker MSHR's line
+    if (auto wit = std::find_if(std::begin(walker_mshr), std::end(walker_mshr), matches_address(packet.address)); wit != std::end(walker_mshr)) {
+      fill_type::returned_value finished_value{packet.data, packet.pf_metadata};
+      wit->data_promise = champsim::waitable{finished_value, current_time + (warmup ? champsim::chrono::clock::duration{} : FILL_LATENCY)};
+      inflight_fills.push_back(*wit);
+      walker_mshr.erase(wit);
+      return;
+    }
+  }
 
   // sanity check
   if (mshr_entry == MSHR.end()) {

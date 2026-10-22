@@ -75,6 +75,19 @@ public:
   // set-index hash: false = plain modulo (legacy first-cut), true = xor-fold
   void set_hash(bool xor_hash_) { xor_hash = xor_hash_; }
 
+  // partial tags (set-associative mode only): 0 = full entry-PC match (default);
+  // N > 0 = ways compare an N-bit hashed tag of the entry PC.  A probe whose
+  // partial tag matches a different trace launches that trace's window deltas
+  // from the PROBING PC's window (what hardware storing only deltas does), and
+  // an insert whose partial tag matches a different trace overwrites it.
+  void set_tag_bits(unsigned bits) { tag_bits_ = (bits >= 64) ? 0 : bits; }
+  [[nodiscard]] unsigned tag_bits() const { return tag_bits_; }
+  [[nodiscard]] uint64_t lookups() const { return n_lookups; }
+  [[nodiscard]] uint64_t alias_hits() const { return n_alias_hits; }
+  [[nodiscard]] uint64_t alias_overwrites() const { return n_alias_overwrites; }
+  // side-effect-free residency check by entry PC (partial-tag aware)
+  [[nodiscard]] bool contains(uint64_t pc) const { return find_slot(pc) != NPOS; }
+
   // cost aging for cost_evict: halve every resident cost each `period`
   // insertions (0 = off).  Without aging, accumulated costs fossilize stale
   // traces (measured -3.5pp); periodic halving keeps the ranking recent.
@@ -105,10 +118,17 @@ public:
         e.cost >>= 1;
       }
     }
-    if (auto it = entry_index.find(entry); it != entry_index.end()) { // refresh
-      const std::size_t slot = it->second;
+    if (const std::size_t found = find_slot(entry); found != NPOS) { // refresh (or partial-tag alias)
+      const std::size_t slot = found;
       if (window_indexed) {
         remove_windows(slot);
+      }
+      if (entries[slot].entry != entry) {
+        ++n_alias_overwrites; // a different trace with the same partial tag is replaced
+        entry_index.erase(entries[slot].entry);
+        entries[slot].entry = entry;
+        entry_index[entry] = slot;
+        entries[slot].conf = CONF_INIT;
       }
       entries[slot].ips = ips;
       entries[slot].lru = ++tick;
@@ -172,10 +192,10 @@ public:
   // launch-suppressed trace (conf 0) gets one retry (conf 1).
   void update_cost(uint64_t entry, uint64_t cost)
   {
-    if (auto it = entry_index.find(entry); it != entry_index.end()) {
-      entries[it->second].cost = clamp_cost(cost);
-      if (entries[it->second].conf == 0) {
-        entries[it->second].conf = 1;
+    if (const std::size_t slot = find_slot(entry); slot != NPOS) {
+      entries[slot].cost = clamp_cost(cost);
+      if (entries[slot].conf == 0) {
+        entries[slot].conf = 1;
       }
     }
   }
@@ -187,41 +207,111 @@ public:
   static constexpr uint8_t CONF_MAX = 3;
   void conf_hit(uint64_t entry)
   {
-    if (auto it = entry_index.find(entry); it != entry_index.end() && entries[it->second].conf < CONF_MAX) {
-      ++entries[it->second].conf;
+    if (const std::size_t slot = find_slot(entry); slot != NPOS && entries[slot].conf < CONF_MAX) {
+      ++entries[slot].conf;
     }
   }
   void conf_miss(uint64_t entry)
   {
-    if (auto it = entry_index.find(entry); it != entry_index.end() && entries[it->second].conf > 0) {
-      --entries[it->second].conf;
+    if (const std::size_t slot = find_slot(entry); slot != NPOS && entries[slot].conf > 0) {
+      --entries[slot].conf;
     }
   }
   [[nodiscard]] int conf_of(uint64_t entry) const
   {
-    auto it = entry_index.find(entry);
-    return (it == entry_index.end()) ? -1 : static_cast<int>(entries[it->second].conf);
+    const std::size_t slot = find_slot(entry);
+    return (slot == NPOS) ? -1 : static_cast<int>(entries[slot].conf);
+  }
+  // census of the stored windows: total (per trace, deduplicated within a trace), distinct across traces, and those
+  // held by two or more traces
+  void window_census(unsigned bits, uint64_t& total, uint64_t& distinct, uint64_t& shared) const
+  {
+    std::unordered_map<uint64_t, uint32_t> count;
+    total = 0;
+    for (const auto& e : entries) {
+      if (!e.valid) {
+        continue;
+      }
+      std::unordered_set<uint64_t> mine;
+      for (uint64_t ip : e.ips) {
+        mine.insert(ip >> bits);
+      }
+      total += mine.size();
+      for (uint64_t w : mine) {
+        ++count[w];
+      }
+    }
+    distinct = count.size();
+    shared = 0;
+    for (const auto& [w, n] : count) {
+      shared += (n >= 2) ? 1 : 0;
+    }
+  }
+  [[nodiscard]] int64_t cost_of(uint64_t entry) const
+  {
+    const std::size_t slot = find_slot(entry);
+    return (slot == NPOS) ? -1 : static_cast<int64_t>(entries[slot].cost);
   }
   // conf-aware eviction: a conf-0 trace is the first-choice victim, ahead of
   // the LRU / min-cost compare
   void set_conf_evict(bool on) { conf_evict = on; }
   [[nodiscard]] bool conf_policy() const { return conf_evict; }
 
+  // trace_chain_depth: the successor pointer of `entry`'s trace (side-effect free)
+  [[nodiscard]] uint64_t next_of(uint64_t entry) const
+  {
+    const std::size_t slot = find_slot(entry);
+    return (slot != NPOS) ? entries[slot].next : 0;
+  }
+  // record that `next` followed `entry`; false when `entry` is not stored
+  bool set_next(uint64_t entry, uint64_t next)
+  {
+    const std::size_t slot = find_slot(entry);
+    if (slot == NPOS) {
+      return false;
+    }
+    entries[slot].next = next;
+    return true;
+  }
+
   // lookup by trace entry PC (used by "miss" and "every" fill modes)
   const std::vector<uint64_t>* lookup_entry(uint64_t ip)
   {
-    auto it = entry_index.find(ip);
-    if (it == entry_index.end()) {
+    ++n_lookups;
+    const std::size_t slot = find_slot(ip);
+    if (slot == NPOS) {
       return nullptr;
     }
-    entries[it->second].lru = ++tick;
-    return &entries[it->second].ips;
+    entries[slot].lru = ++tick;
+    if (entries[slot].entry == ip) {
+      return &entries[slot].ips;
+    }
+    // partial-tag alias: the stored deltas are applied from the probing PC's
+    // window; the result is valid until the next lookup_entry call
+    ++n_alias_hits;
+    if (((ip >> 63) != 0) || ((entries[slot].entry >> 63) != 0)) {
+      // a hashed key (mispredict event / recovery key) is not an address: its entry
+      // carries its own start, so a false match walks the stored path as recorded
+      return &entries[slot].ips;
+    }
+    const uint64_t shift = ((ip >> window_bits) - (entries[slot].entry >> window_bits)) << window_bits;
+    alias_ips_.clear();
+    for (uint64_t v : entries[slot].ips) {
+      alias_ips_.push_back(v + shift);
+    }
+    return &alias_ips_;
   }
 
   // measurement-only peeks: no LRU update, no side effects.  Used by the chain
   // miss-classification shadow instrumentation (mid-trace trigger-gap sizing).
   [[nodiscard]] bool peek_entry(uint64_t ip) const { return entry_index.count(ip) != 0; }
   [[nodiscard]] bool peek_window(uint64_t ip) const { return window_indexed && window_index.count(ip >> window_bits) != 0; }
+  // the stored uops of the trace whose entry is exactly ip (trace_trigger_diag)
+  [[nodiscard]] const std::vector<uint64_t>* peek_ips(uint64_t ip) const
+  {
+    auto it = entry_index.find(ip);
+    return (it == entry_index.end()) ? nullptr : &entries[it->second].ips;
+  }
 
   // lookup by the window containing ip (used by "window" fill mode)
   const std::vector<uint64_t>* lookup_window(uint64_t ip)
@@ -246,6 +336,7 @@ private:
     std::vector<uint64_t> windows; // distinct window keys (only if window_indexed)
     bool valid = false;            // slot occupancy (pre-sized set-associative array)
     uint8_t conf = CONF_INIT;      // launch confidence (trace_launch_conf); fresh traces start weakly confident
+    uint64_t next = 0;             // trace_chain_depth: entry pc of the costly trace that followed this one last time (0 = none)
   };
 
   static std::size_t env_capacity()
@@ -287,6 +378,46 @@ private:
   // xor_hash folds higher PC bits into the index (hot code clusters entry PCs
   // so low bits alone skew badly: measured 100% of set-assoc evictions occur
   // while the store is globally underfull under the plain modulo index).
+  static constexpr std::size_t NPOS = static_cast<std::size_t>(-1);
+
+  // N-bit hashed partial tag of an entry PC: xor-fold of the address bits the set
+  // index does not consume -- the word address above the index bits plus the two
+  // byte-offset bits (x86 traces start entries at any byte; the index drops them)
+  [[nodiscard]] uint64_t ptag(uint64_t pc) const
+  {
+    unsigned idx_bits = 0;
+    while ((std::size_t{1} << idx_bits) < num_sets) {
+      ++idx_bits;
+    }
+    uint64_t src = (((pc >> 2) >> idx_bits) << 2) | (pc & 3);
+    const uint64_t mask = (uint64_t{1} << tag_bits_) - 1;
+    uint64_t t = 0;
+    while (src != 0) {
+      t ^= src & mask;
+      src >>= tag_bits_;
+    }
+    return t;
+  }
+
+  // the slot holding `pc`'s trace: exact entry-PC match, or (partial tags) the way
+  // in pc's set with an equal partial tag; NPOS if none.  Inserts replace partial-
+  // tag matches, so a set never holds two traces with the same partial tag.
+  [[nodiscard]] std::size_t find_slot(uint64_t pc) const
+  {
+    if (tag_bits_ == 0 || num_ways == 0) {
+      auto it = entry_index.find(pc);
+      return (it == entry_index.end()) ? NPOS : it->second;
+    }
+    const std::size_t base = set_of(pc) * num_ways;
+    const uint64_t t = ptag(pc);
+    for (std::size_t i = base; i < base + num_ways; ++i) {
+      if (entries[i].valid && ptag(entries[i].entry) == t) {
+        return i;
+      }
+    }
+    return NPOS;
+  }
+
   [[nodiscard]] std::size_t set_of(uint64_t entry) const
   {
     const uint64_t h = entry >> 2;
@@ -366,6 +497,11 @@ private:
   std::vector<ent> entries;
   std::unordered_map<uint64_t, std::size_t> entry_index;
   std::unordered_map<uint64_t, std::size_t> window_index;
+  unsigned tag_bits_ = 0;         // partial-tag width (0 = full match)
+  uint64_t n_lookups = 0;         // entry probes
+  uint64_t n_alias_hits = 0;      // probes that matched a DIFFERENT trace's partial tag
+  uint64_t n_alias_overwrites = 0; // inserts that replaced a different trace with the same partial tag
+  std::vector<uint64_t> alias_ips_; // rebased manifest returned on an alias hit
 };
 
 #endif

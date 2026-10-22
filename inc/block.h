@@ -31,6 +31,9 @@ struct cache_block {
   champsim::address data{};
 
   uint32_t pf_metadata = 0;
+
+  bool priority = false;  // EMISSARY: its miss starved decode (high-priority line)
+  uint64_t lru_stamp = 0; // EMISSARY: recency kept by the cache itself
 };
 } // namespace champsim
 

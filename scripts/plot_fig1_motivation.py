@@ -69,7 +69,7 @@ ax.set_xlim(-0.55, len(suites) - 1 + 0.55)
 ax.set_xticks(range(len(suites)))
 ax.set_xticklabels([f"{s}\n({DATA[s][2]} traces)" for s in suites],
                    fontsize=7.5, color=INK, linespacing=1.2)
-ax.set_ylabel("Geomean speedup\nover no µ-op cache (%)", fontsize=8, color=INK, linespacing=1.2)
+ax.set_ylabel("Geomean speedup\nover no uop cache (%)", fontsize=8, color=INK, linespacing=1.2)
 ax.set_ylim(0, 19)
 ax.set_yticks([0, 5, 10, 15])
 ax.yaxis.set_tick_params(labelsize=7, colors=MUTED, width=0.6)
@@ -83,9 +83,9 @@ for side in ("left", "bottom"):
 
 # neutral-gray proxies: hue belongs to the suite, fill style to the config
 legend_handles = [
-    Patch(facecolor=INK_2ND, label="6K µ-ops cache"),
+    Patch(facecolor=INK_2ND, label="6K uops cache"),
     Patch(facecolor="#f0efec", hatch="////", edgecolor=MUTED, linewidth=0.6,
-          label="ideal µ-op cache"),
+          label="ideal uop cache"),
 ]
 ax.legend(handles=legend_handles, fontsize=7, frameon=False, loc="upper right",
           handlelength=1.2, handletextpad=0.5, borderaxespad=0.1)

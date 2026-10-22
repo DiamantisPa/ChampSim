@@ -60,6 +60,9 @@ class channel
     champsim::address data{};
     uint64_t instr_id = 0;
     champsim::address ip{};
+    bool is_instr = false; // an instruction-side request (forwarded from an L1I)
+    bool no_fill = false;  // non-allocating read: no cache level allocates it or updates replacement/prefetcher state
+    bool walker = false;   // a trace-walk line read: an L1I miss takes a walker MSHR (CACHE::walker_mshr_cap), not a regular one
 
     std::vector<uint64_t> instr_depend_on_me{};
   };

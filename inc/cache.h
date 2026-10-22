@@ -32,6 +32,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 #include "address.h"
@@ -72,6 +73,9 @@ class CACHE : public champsim::operable
     bool skip_fill;
     bool is_translated;
     bool translate_issued = false;
+    bool is_instr = false;
+    bool no_fill = false;
+    bool walker = false;
 
     uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
 
@@ -100,6 +104,7 @@ public:
 
     access_type type;
     bool prefetch_from_this;
+    bool no_fill = false;
 
     uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
 
@@ -114,6 +119,31 @@ public:
 
 private:
   bool try_hit(const tag_lookup_type& handle_pkt);
+
+public:
+  // is the block holding this virtual address resident?  (u-op-cache inclusion check; exact when the
+  // set-index bits lie in the page offset, as for the 4KB-per-way L1I)
+  [[nodiscard]] bool has_virtual_block(champsim::address v_addr) const;
+
+  // caches register here at their first operate() (their addresses are final by then), so a core
+  // can reach its L2 by name to configure the instruction-side knobs below
+  static std::vector<CACHE*>& live_caches();
+  static CACHE* find_live(const std::string& name);
+
+  // instruction-side L2 knobs (set by the core from its JSON; off by default)
+  int perfect_instr = 0;         // ceiling: an instruction request that misses here hits anyway -- 1: if this
+                                 // line was requested before (re-executed code), 2: always
+  std::size_t emissary_ways = 0; // EMISSARY P(N): up to N high-priority lines per set are protected (0 = off)
+  uint64_t perfect_instr_hits = 0;
+  uint64_t emissary_marks = 0;
+  uint64_t emissary_diverted = 0;      // evictions moved off the replacement policy's choice
+  uint64_t emissary_prot_evicted = 0;  // high-priority lines evicted anyway (set over quota)
+  // EMISSARY marking: by virtual address (L1I, set index within the page offset) -- returns the
+  // physical address; by physical address (L2)
+  bool mark_priority_virtual(champsim::address v_addr, champsim::address& p_addr);
+  bool mark_priority_physical(champsim::address p_addr);
+
+private:
   bool handle_fill(const fill_type& fill);
   bool handle_miss(const tag_lookup_type& handle_pkt);
   bool handle_write(const tag_lookup_type& handle_pkt);
@@ -130,6 +160,21 @@ private:
   using set_type = std::vector<BLOCK>;
 
   std::pair<set_type::iterator, set_type::iterator> get_set_span(champsim::address address);
+  bool registered_ = false;     // added to live_caches()
+  bool is_instr_cache_ = false; // an L1I: requests it forwards are instruction-side
+public:
+  // trace_walk_nofill 2: a non-allocating read skips only the instruction cache -- the L1I forwards it
+  // as an ordinary (allocating) read, so L2/LLC keep the line
+  static inline bool nofill_instr_only = false;
+  // walker MSHRs (trace walks with walk_l2_mshrs > 0): an instruction-cache miss of a walk line is held in a separate small
+  // MSHR file, forwarded to the lower level as an ordinary allocating read, and handed back without filling this cache;
+  // demand/prefetch misses to the same line merge into it.  The core keeps the count under its cap.
+  std::deque<fill_type> walker_mshr;
+  uint64_t walker_mshr_peak = 0;
+  [[nodiscard]] std::size_t walker_inflight() const { return walker_mshr.size(); }
+private:
+  uint64_t emissary_clock_ = 0;
+  std::unordered_set<uint64_t> instr_seen_; // perfect_instr 1: instruction lines requested so far
   [[nodiscard]] std::pair<set_type::const_iterator, set_type::const_iterator> get_set_span(champsim::address address) const;
   [[nodiscard]] long get_set_index(champsim::address address) const;
 

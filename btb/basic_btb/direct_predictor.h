@@ -1,6 +1,8 @@
 #ifndef BTB_BASIC_BTB_DIRECT_PREDICTOR_H
 #define BTB_BASIC_BTB_DIRECT_PREDICTOR_H
 
+#include <cstdlib>
+
 #include <cstdint>
 #include <optional>
 
@@ -37,7 +39,15 @@ struct direct_predictor {
     }
   };
 
-  champsim::msl::lru_table<btb_entry_t> BTB{sets, ways};
+  // PROMETHEUS_BTB_SETS: sensitivity override of the set count (entries = sets x 8)
+  static std::size_t configured_sets()
+  {
+    if (const char* e = std::getenv("PROMETHEUS_BTB_SETS"); e != nullptr && *e != '\0' && std::atol(e) > 0) {
+      return static_cast<std::size_t>(std::atol(e));
+    }
+    return sets;
+  }
+  champsim::msl::lru_table<btb_entry_t> BTB{configured_sets(), ways};
   std::optional<btb_entry_t> check_hit(champsim::address ip);
   void update(champsim::address ip, champsim::address branch_target, uint8_t branch_type);
 };

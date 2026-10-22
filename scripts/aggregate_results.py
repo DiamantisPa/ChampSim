@@ -29,6 +29,7 @@ RE_STG = re.compile(r'trace-stg: loop (\d+) function (\d+) dedup-hits (\d+) enta
 RE_STG_COV = re.compile(r'trace-stg coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
 RE_STALL = re.compile(r'trace-stall: traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+) stored-uops (\d+)(?: l1i-gated (\d+))?(?: marks-dropped (\d+))?', re.M)
 RE_STALL_COV = re.compile(r'trace-stall coverage: unique IPs (\d+)/(\d+) \([\d.-]+%\) dynamic uops (\d+)/(\d+)', re.M)
+RE_TAGS = re.compile(r'trace-store-tags: lookups (\d+) alias-hits (\d+) alias-overwrites (\d+)', re.M)
 RE_STORE = re.compile(r'trace-store: evictions (\d+) conflict-evictions (\d+) occupancy (\d+)(?: windows (\d+) shared (\d+))?', re.M)
 RE_EVENT = re.compile(r'trace-event: probes (\d+) probe-hits (\d+) traces (\d+) \(of (\d+) candidates\) dedup-hits (\d+)', re.M)
 RE_MISSCLS = re.compile(r'chain-miss-classes: in-flight (\d+) entry (\d+) mid-trace (\d+)', re.M)
@@ -55,6 +56,78 @@ RE_CHAIN = re.compile(r'trace-chain: unencodable (\d+) truncated (\d+) buffer-hi
                       r'(?: evicted-then-missed (\d+) age\(256/1K/4K/16K/inf\): (\d+) (\d+) (\d+) (\d+) (\d+))?'
                       r' slack\(4/8/16/32/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
 
+RE_DELTAS = re.compile(r'trace-chain-deltas: seq (\d+) short (\d+) long (\d+) far (\d+)'
+                       r'(?: traces: single (\d+) seq-only (\d+) with-short (\d+) with-long (\d+))?(?: far-truncated (\d+))?', re.M)
+# packed-format widths from the knob echo (absent on older binaries -> 2/8/16 assumed)
+RE_FMT = re.compile(r'meta_bits=(\d+) short_bits=(\d+) long_bits=(\d+)(?: kind_bits=(\d+) far_truncate=(\d+))?')
+RE_NEED = re.compile(r'trace-chain-need: bits\(16/24/32/48/64/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) '
+                     r'windows\(2/3/4/6/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) trunc-windows (\d+)', re.M)
+RE_REACH = re.compile(r'trace-chain-reach: transfers\(4K/128K/256K/512K/1M/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) '
+                      r'traces\(none/4K/128K/256K/512K/1M/inf\): (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
+RE_PROMOTE = re.compile(r'trace-chain-promote: buffer-rehits (\d+)', re.M)
+RE_PROMOTE_KNOB = re.compile(r'buffer_promote=(\d+)')
+RE_SHADOW = re.compile(r'trace-chain-shadow: mispredicts (\d+) past-mispredict walks (\d+) lines (\d+) staged-windows (\d+) buffer-hits (\d+)', re.M)
+RE_SQUASH_KNOB = re.compile(r'probe_squash=(\d+)')
+RE_WP = re.compile(r'trace-wrong-path: cursor-stops (\d+) shadows (\d+) addresses (\d+) fetched (\d+) uop-misses (\d+) fetch-cycles (\d+) '
+                   r'decoder-busy-cycles (\d+) store-hits (\d+) ucp-triggers (\d+) walks (\d+) flushed (\d+) lines (\d+) staged (\d+) buffer-hits (\d+)'
+                   r'(?: l1i-lines (\d+) line-stall-cycles (\d+) backend-full-cycles (\d+))?(?: stops (\d+) uop-fills (\d+))?', re.M)
+RE_WP_KNOB = re.compile(r'wrong_path=(\w+)')
+RE_PEEK = re.compile(r'trace-peek: probes (\d+) store-hits (\d+)', re.M)
+RE_RK = re.compile(r'trace-recovery-key: mispredicts (\d+) filed (\d+) probes (\d+) hits (\d+) walks (\d+) buffer-hits (\d+)', re.M)
+RE_RK_KNOB = re.compile(r'recovery_key=(\d) recovery_ghr=(\d+) recovery_h2p=(\d)')
+RE_VP = re.compile(r'trace-vpred: lookups (\d+) matches (\d+) fires (\d+) store-hits (\d+) walks (\d+) walks-at-mispredict (\d+) '
+                   r'buffer-hits (\d+) buffer-hits-at-mispredict (\d+)', re.M)
+RE_VPT = re.compile(r'trace-vpred-train: events (\d+) after-mispredict (\d+) correct (\d+) correct-after-mispredict (\d+) wrong (\d+) '
+                    r'no-provider (\d+) none (\d+) allocs (\d+) alloc-fail (\d+)', re.M)
+RE_VP_KNOB = re.compile(r'vpred=(\d) vpred_tables=(\d+) vpred_entries=(\d+) vpred_hist=(\d+) vpred_kbytes=([\d.]+)')
+RE_SUCC = re.compile(r'trace-succession (steady|after-mispredict): addr\(next/near/4K/jump\) (\d+) (\d+) (\d+) (\d+) '
+                     r'gap\(0/1-8/9-64/65-256/more\) (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
+RE_CHFOLLOW = re.compile(r'trace-chain-follow: links (\d+) hops (\d+) found (\d+) walks\(hop1/2/3/4\+\) (\d+) (\d+) (\d+) (\d+) '
+                         r'buffer-hits\(hop1/2/3/4\+\) (\d+) (\d+) (\d+) (\d+)', re.M)
+RE_CHAIN_KNOB = re.compile(r'chain_depth=(\d+) chain_window=(\d+)')
+VP_KEYS = ('vp_lookups', 'vp_matches', 'vp_fires', 'vp_store_hits', 'vp_walks', 'vp_walks_mp', 'vp_bhits', 'vp_bhits_mp')
+VPT_KEYS = ('vp_train', 'vp_train_mp', 'vp_correct', 'vp_correct_mp', 'vp_wrong', 'vp_noprov', 'vp_none', 'vp_allocs', 'vp_alloc_fail')
+RE_PDIAG = re.compile(r'trace-peek-diag: mispredicts (\d+) with-trace (\d+)', re.M)
+RE_PDIAG_KEY = re.compile(r'trace-peek-diag key (\S+): fires (\d+) useful (\d+) wrong (\d+)', re.M)
+WP_KEYS = ('wp_cursor_stops', 'wp_shadows', 'wp_addresses', 'wp_fetched', 'wp_uop_misses', 'wp_fetch_cycles', 'wp_decoder_busy',
+           'wp_store_hits', 'wp_ucp_triggers', 'wp_walks', 'wp_flushed', 'wp_lines', 'wp_staged', 'wp_buffer_hits',
+           'wp_l1i_lines', 'wp_line_stalls', 'wp_full', 'wp_stops', 'wp_uop_fills')
+RE_DBITS = re.compile(r'trace-chain-deltabits\(<=3\.\.16,>16\): ((?:\d+ ){14}\d+)', re.M)
+RE_READMIT = re.compile(r'trace-stall-readmit: evicted-recaptures (\d+) readmitted (\d+)', re.M)
+RE_MPOPEN = re.compile(r'trace-stall-mpopen: opened (\d+) traces (\d+)', re.M)
+RE_SPLIT = re.compile(r'trace-stall-split: continuations (\d+) inherited-costly (\d+) stored (\d+)', re.M)
+RE_MP = re.compile(r'uop-miss-profile: windows (\d+) misses (\d+) stall-cycles (\d+) other-stall-cycles (\d+)', re.M)
+RE_MP_TOP = re.compile(r'uop-miss-profile top-by-cost\(1K/2K/4K/8K\) cum% (\S+) (\S+) (\S+) (\S+)  top-by-misses\(1K/2K/4K/8K\) cum% (\S+) (\S+) (\S+) (\S+)', re.M)
+RE_MP_TR = re.compile(r'uop-miss-profile traced-by-segmenter: all (\S+)%  top1K (\S+)%  top2K (\S+)%  top4K (\S+)%  top8K (\S+)%', re.M)
+RE_ORACLE_KNOB = re.compile(r'uop_oracle=(\d+)')
+RE_TORACLE_KNOB = re.compile(r'trace_oracle=(\d+)')
+RE_OINSTALL_KNOB = re.compile(r'oracle_install=(\d)')
+RE_SUCP_KB = re.compile(r'SUCP total ([\d.]+) KB')
+RE_FUP = re.compile(r'ftq-uop-prefetch: walks (\d+)', re.M)
+RE_FDIP = re.compile(r'ftq-fdip: issued (\d+) dropped (\d+)(?: wrong-path (\d+))?', re.M)
+RE_TAX = re.compile(r'stall-taxonomy tight \(.*?\): ([\d ]+) \| other: not-looked-up (\d+) uop-hit (\d+)', re.M)
+RE_L2I = re.compile(r'l2-instr: perfect-hits (\d+) emissary-mark-events (\d+) l2-marks (\d+) diverted-evictions (\d+) high-priority-evicted (\d+)', re.M)
+RE_RP = re.compile(r'resteer-prefetch: lookups (\d+) hits (\d+) prefetches (\d+) dropped (\d+) records (\d+)', re.M)
+RE_RP_KB = re.compile(r'rp_storage_kb=([\d.]+)')
+# trace_trigger_diag: class order matches O3_CPU::TD_*
+TD_LABELS = ['unclassified', 'uncovered', 'not-stored', 'side-door', 'not-probed', 'dropped', 'resident-at-probe', 'late', 'staged-evicted', 'walked-gone',
+             'cold', 'past-depth', 'never-costly', 'costly-once', 'costly-repeat']
+_td10 = r'((?:\d+ )*\d+)'  # the class list (10 classes on older binaries, 15 with the window history)
+RE_TD_PROBES = re.compile(r'trace-trigger-diag probes\(resident/conf/cap/dedup/launched\): (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
+RE_TD_ARR = re.compile(r'trace-trigger-diag arrivals (\d+) resident (\d+) staged (\d+) missed-by-class: ' + _td10, re.M)
+RE_TD_LEAD = re.compile(r'trace-trigger-diag lead\(8/16/32/64/128/inf\) served: ' + ' '.join([r'(\d+)'] * 6) + ' missed: ' + ' '.join([r'(\d+)'] * 6), re.M)
+RE_TD_MISS = re.compile(r'trace-trigger-diag misses-by-class: ' + _td10, re.M)
+RE_TD_TIGHT = re.compile(r'trace-trigger-diag empty-rob-cycles-by-class: ' + _td10 + r' other (\d+)', re.M)
+RE_TD_UPPER = re.compile(r'trace-trigger-diag starve-cycles-by-class: ' + _td10 + r' other (\d+)', re.M)
+RE_TD_POS = re.compile(r'trace-trigger-diag staged-position\(0/1/2/3/4\+\) used: (\d+) (\d+) (\d+) (\d+) (\d+) unused: (\d+) (\d+) (\d+) (\d+) (\d+)', re.M)
+RE_TD_STAGE = re.compile(r'trace-trigger-diag staged (\d+) late (\d+) evicted-unused: late (\d+) on-time (\d+)', re.M)
+RE_TD_REC = re.compile(r'trace-trigger-diag recovery-misses-by-class: ' + _td10, re.M)
+RE_TD_HT = re.compile(r'trace-trigger-diag empty-rob-cycles-by-run-head: ' + _td10 + r' other (\d+)', re.M)
+RE_TD_HU = re.compile(r'trace-trigger-diag starve-cycles-by-run-head: ' + _td10 + r' other (\d+)', re.M)
+RE_COST_BIG = re.compile(r'trace-stall top-by-cost-big \(cum% stall-cycles\): 2048=([\d.-]+)% 4096=([\d.-]+)% 8192=([\d.-]+)%', re.M)
+RE_RUN = re.compile(r'trace-run: cut-at-jump (\d+) cut-at-limit (\d+) inherited-costly (\d+) continuation-traces-stored (\d+)', re.M)
+RE_LEAD = re.compile(r'trace-stall-lead: keyed (\d+) self (\d+) traces (\d+) conflicts (\d+) dist\(4K/64K/1M/far\) (\d+) (\d+) (\d+) (\d+)', re.M)
+RE_STARVE = re.compile(r'trace-stall-starve: offset-windows\(0/1/2/3/4-7/8\+/past-depth/before/after\): ((?:\d+ ){8}\d+)', re.M)
 RE_UCPPORT = re.compile(r'trace-ucp: cond (\d+) cond-misses (\d+) h2p-marked (\d+) h2p-marked-misses (\d+) paths (\d+) '
                         r'stops\(sat/ind/btbmiss/maxip\): (\d+) (\d+) (\d+) (\d+)(?: ind-walked (\d+))?(?: bank-conflicts (\d+))?', re.M)
 
@@ -67,7 +140,9 @@ RE_UCP_PREF_HITS = re.compile(r'^hits_from_pref:\s+(\d+)', re.M)
 RE_UCP_H2P_COV = re.compile(r'^h2p_coverage:\s+([\d.]+)', re.M)
 RE_UCP_H2P_ACC = re.compile(r'^h2p_accuracy:\s+([\d.]+)', re.M)
 # standard ChampSim L1I prefetch-traffic line (both printers emit it)
-RE_L1I_TOT = re.compile(r'L1I LOAD\s+ACCESS:\s+(\d+)\s+HIT:\s+(\d+)\s+MISS:\s+(\d+)', re.M)  # LOAD = demand-only (TOTAL includes prefetch accesses)
+RE_L1I_TOT = re.compile(r'L1I LOAD\s+ACCESS:\s+(\d+)\s+HIT:\s+(\d+)\s+MISS:\s+(\d+)', re.M)  # LOAD excludes prefetches but INCLUDES SUCP/UCP walk lines
+# demand fetch lines that missed L1I (fetch-side, walk lines excluded), steady/recovery + summed wait
+RE_DEMAND_L1I = re.compile(r'frontend-loss l1i-missed-fetches: steady (\d+) recovery (\d+) wait-cycles steady (\d+) recovery (\d+)', re.M)
 RE_L1I_PREF = re.compile(r'L1I PREFETCH\s+REQUESTED:\s+(\d+)\s+ISSUED:\s+(\d+)\s+USEFUL:\s+(\d+)\s+USELESS:\s+(\d+)', re.M)
 
 
@@ -120,6 +195,9 @@ def parse_file(path):
     ti = RE_TIGHT.search(txt)
     if ti:
         d['ti_steady'], d['ti_recovery'], d['ti_total'] = int(ti.group(1)), int(ti.group(2)), int(ti.group(3))
+    dl1 = RE_DEMAND_L1I.search(txt)
+    if dl1:
+        d['dl1_steady'], d['dl1_recovery'], d['dl1_wait_steady'], d['dl1_wait_recovery'] = (int(dl1.group(i)) for i in range(1, 5))
     ls = RE_LOST.search(txt)
     if ls:
         d['ls_steady'], d['ls_recovery'], d['ls_total'] = int(ls.group(1)), int(ls.group(2)), int(ls.group(3))
@@ -150,6 +228,9 @@ def parse_file(path):
         d['store_evict'], d['store_conflict'], d['store_occ'] = int(sto.group(1)), int(sto.group(2)), int(sto.group(3))
         if sto.group(4):
             d['store_win'], d['store_shared'] = int(sto.group(4)), int(sto.group(5))
+    tg = RE_TAGS.search(txt)
+    if tg:
+        d['store_lookups'], d['store_alias_hits'], d['store_alias_over'] = int(tg.group(1)), int(tg.group(2)), int(tg.group(3))
     ev = RE_EVENT.search(txt)
     if ev:
         d['ev_probes'], d['ev_hits'] = int(ev.group(1)), int(ev.group(2))
@@ -204,6 +285,159 @@ def parse_file(path):
         d['chain_evicted_missed'] = int(ch.group(7)) if ch.group(7) else None
         d['chain_evicted_age'] = [int(ch.group(i)) for i in range(8, 13)] if ch.group(7) else None
         d['chain_slack'] = [int(ch.group(i)) for i in range(13, 19)]
+    dl = RE_DELTAS.search(txt)
+    if dl:
+        d['chain_deltas'] = [int(dl.group(i)) for i in range(1, 5)]
+        if dl.group(5):
+            d['chain_trace_kinds'] = [int(dl.group(i)) for i in range(5, 9)]
+        d['chain_far_truncated'] = int(dl.group(9)) if dl.group(9) else None
+    fm = RE_FMT.search(txt)
+    if fm:
+        d['fmt_meta_bits'], d['fmt_short'], d['fmt_long'] = int(fm.group(1)), int(fm.group(2)), int(fm.group(3))
+        d['fmt_kind'] = int(fm.group(4)) if fm.group(4) else 2
+        d['fmt_far_trunc'] = int(fm.group(5)) if fm.group(5) else 0
+    nd = RE_NEED.search(txt)
+    if nd:
+        d['chain_need_bits'] = [int(nd.group(i)) for i in range(1, 7)]
+        d['chain_need_windows'] = [int(nd.group(i)) for i in range(7, 12)]
+        d['chain_trunc_windows'] = int(nd.group(12))
+    pr = RE_PROMOTE.search(txt)
+    if pr:
+        d['chain_buf_rehits'] = int(pr.group(1))
+    sh = RE_SHADOW.search(txt)
+    if sh:
+        (d['shadow_mispredicts'], d['shadow_walks'], d['shadow_lines'],
+         d['shadow_windows'], d['shadow_hits']) = (int(sh.group(i)) for i in range(1, 6))
+    wp = RE_WP.search(txt)
+    if wp:
+        for i, k in enumerate(WP_KEYS):
+            d[k] = int(wp.group(i + 1) or 0)  # level-3 fields are absent in older logs
+    wk = RE_WP_KNOB.search(txt)
+    if wk:
+        d['wrong_path_name'] = wk.group(1)  # 0-3 or 'ucp' (= level 1 + fetch-block rule)
+        d['wrong_path'] = {'ucp': 1, 'ucp2': 3}.get(wk.group(1)) or int(wk.group(1))
+    pk_ = RE_PEEK.search(txt)
+    if pk_:
+        d['peek_probes'], d['peek_hits'] = int(pk_.group(1)), int(pk_.group(2))
+    rk = RE_RK.search(txt)
+    if rk:
+        (d['rk_mp'], d['rk_filed'], d['rk_probes'], d['rk_hits'], d['rk_walks'], d['rk_bhits']) = (int(rk.group(i)) for i in range(1, 7))
+    cf = RE_CHFOLLOW.search(txt)
+    if cf:
+        d['chf'] = [int(cf.group(i)) for i in range(1, 12)]
+    ck = RE_CHAIN_KNOB.search(txt)
+    if ck:
+        d['chain_knob'] = (int(ck.group(1)), int(ck.group(2)))
+    for sm in RE_SUCC.finditer(txt):
+        d['succ_' + ('mp' if sm.group(1) != 'steady' else 'st')] = [int(sm.group(i)) for i in range(2, 11)]
+    vp = RE_VP.search(txt)
+    if vp:
+        for i, k in enumerate(VP_KEYS):
+            d[k] = int(vp.group(i + 1))
+    vpt = RE_VPT.search(txt)
+    if vpt:
+        for i, k in enumerate(VPT_KEYS):
+            d[k] = int(vpt.group(i + 1))
+    vpk = RE_VP_KNOB.search(txt)
+    if vpk:
+        d['vp_knob'] = (int(vpk.group(1)), int(vpk.group(2)), int(vpk.group(3)), int(vpk.group(4)), float(vpk.group(5)))
+    rkk = RE_RK_KNOB.search(txt)
+    if rkk:
+        d['rk_knob'] = (int(rkk.group(1)), int(rkk.group(2)), int(rkk.group(3)))
+    pdg = RE_PDIAG.search(txt)
+    if pdg:
+        d['pdiag_mp'], d['pdiag_wt'] = int(pdg.group(1)), int(pdg.group(2))
+        d['pdiag_keys'] = {m.group(1): (int(m.group(2)), int(m.group(3)), int(m.group(4))) for m in RE_PDIAG_KEY.finditer(txt)}
+    sk = RE_SQUASH_KNOB.search(txt)
+    if sk:
+        d['probe_squash'] = int(sk.group(1))
+    pk = RE_PROMOTE_KNOB.search(txt)
+    d['buffer_promote'] = int(pk.group(1)) if pk else 1
+    db = RE_DBITS.search(txt)
+    if db:
+        d['chain_delta_bits'] = [int(x) for x in db.group(1).split()]  # index 0 = <=3 bits ... 13 = 16 bits, 14 = >16
+    rc = RE_REACH.search(txt)
+    if rc:
+        d['chain_reach_xfer'] = [int(rc.group(i)) for i in range(1, 7)]
+        d['chain_reach_trace'] = [int(rc.group(i)) for i in range(7, 14)]  # none, then 6 reach buckets
+    mp = RE_MP.search(txt)
+    if mp:
+        d['mp'] = [int(mp.group(i)) for i in range(1, 5)]
+        mt = RE_MP_TOP.search(txt)
+        d['mp_top'] = _floats(mt) if mt else None
+        mr = RE_MP_TR.search(txt)
+        d['mp_tr'] = _floats(mr) if mr else None
+    ok_ = RE_ORACLE_KNOB.search(txt)
+    if ok_:
+        d['uop_oracle'] = int(ok_.group(1))
+    to_ = RE_TORACLE_KNOB.search(txt)
+    if to_:
+        d['trace_oracle'] = int(to_.group(1))
+    fu_ = RE_FUP.search(txt)
+    if fu_:
+        d['fup_walks'] = int(fu_.group(1))
+    skb = RE_SUCP_KB.search(txt)
+    if skb:
+        d['sucp_kb'] = float(skb.group(1))
+    tx_ = RE_TAX.search(txt)
+    if tx_:
+        d['tax'] = [int(x) for x in tx_.group(1).split()] + [int(tx_.group(2)), int(tx_.group(3))]
+    l2_ = RE_L2I.search(txt)
+    if l2_:
+        d['l2i'] = [int(x) for x in l2_.groups()]
+    rp_ = RE_RP.search(txt)
+    if rp_:
+        d['rp'] = [int(x) for x in rp_.groups()]
+    rk_ = RE_RP_KB.search(txt)
+    if rk_ and float(rk_.group(1)) > 0:
+        d['rp_kb'] = float(rk_.group(1))
+    fd_ = RE_FDIP.search(txt)
+    if fd_:
+        d['fdip'] = [int(fd_.group(1)), int(fd_.group(2)), int(fd_.group(3) or 0)]
+    oi_ = RE_OINSTALL_KNOB.search(txt)
+    d['oracle_install'] = int(oi_.group(1)) if oi_ else 0
+    tda = RE_TD_ARR.search(txt)
+    if tda:
+        g = tda.groups()
+        d['td_arr'] = [int(g[0]), int(g[1]), int(g[2])]  # arrivals, resident, staged
+        d['td_arr_miss'] = [int(x) for x in g[3].split()]  # by class
+        d['td_probes'] = [int(x) for x in RE_TD_PROBES.search(txt).groups()]
+        tst = RE_TD_STAGE.search(txt)
+        if tst:
+            d['td_stage'] = [int(x) for x in tst.groups()]
+        tps = RE_TD_POS.search(txt)
+        if tps:
+            d['td_pos'] = [int(x) for x in tps.groups()]
+        ld = [int(x) for x in RE_TD_LEAD.search(txt).groups()]
+        d['td_lead_served'], d['td_lead_missed'] = ld[:6], ld[6:]
+        # class lists; the cost lists carry the "other" cycles as one extra last element
+        for key, rx in (('td_miss', RE_TD_MISS), ('td_rec', RE_TD_REC), ('td_tight', RE_TD_TIGHT), ('td_upper', RE_TD_UPPER),
+                        ('td_head_tight', RE_TD_HT), ('td_head_upper', RE_TD_HU)):
+            mt_ = rx.search(txt)
+            if mt_:
+                d[key] = [int(x) for x in mt_.group(1).split()] + ([int(mt_.group(2))] if mt_.lastindex == 2 else [])
+    cbg = RE_COST_BIG.search(txt)
+    if cbg:
+        d['cost_big'] = _floats(cbg)
+    rn = RE_RUN.search(txt)
+    if rn:
+        d['run_jump'], d['run_full'], d['run_inh'], d['run_stored'] = (int(rn.group(i)) for i in range(1, 5))
+    sp = RE_SPLIT.search(txt)
+    if sp:
+        d['split_cont'], d['split_inh'], d['split_stored'] = int(sp.group(1)), int(sp.group(2)), int(sp.group(3))
+    mo = RE_MPOPEN.search(txt)
+    if mo:
+        d['stall_mp_opened'], d['stall_mp_traces'] = int(mo.group(1)), int(mo.group(2))
+    ld = RE_LEAD.search(txt)
+    if ld:
+        d['stall_lead_keyed'], d['stall_lead_self'], d['stall_lead_traces'], d['stall_lead_conflicts'] = (int(ld.group(i)) for i in range(1, 5))
+        d['stall_lead_dist'] = [int(ld.group(i)) for i in range(5, 9)]
+    ra = RE_READMIT.search(txt)
+    if ra:
+        d['stall_lost_recap'], d['stall_readmits'] = int(ra.group(1)), int(ra.group(2))
+    sv = RE_STARVE.search(txt)
+    if sv:
+        d['stall_starve_offset'] = [int(x) for x in sv.group(1).split()]
     up2 = RE_UCPPORT.search(txt)
     if up2:
         (d['ucpp_cond'], d['ucpp_cond_miss'], d['ucpp_marked'], d['ucpp_marked_miss'], d['ucpp_paths'],
@@ -291,7 +525,14 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
         print(f"muop-$ MPKI:  {amean([1000.0 * r['miss_total'] / r['instrs'] for r in mm]):.1f}")
     l1 = [r for r in rows if r.get('l1i_miss') is not None and r.get('instrs')]
     if l1:
-        print(f"L1I MPKI:     {amean([1000.0 * r['l1i_miss'] / r['instrs'] for r in l1]):.3f}")
+        print(f"L1I MPKI:     {amean([1000.0 * r['l1i_miss'] / r['instrs'] for r in l1]):.3f}   (incl. walk lines)")
+    dl = [r for r in rows if r.get('dl1_steady') is not None and r.get('instrs')]
+    if dl:
+        # demand-only: fetch lines that missed L1I, and how long they waited (the latency a line prefetch hides)
+        s_, r_ = amean([r['dl1_steady'] for r in dl]), amean([r['dl1_recovery'] for r in dl])
+        ws, wr = amean([r['dl1_wait_steady'] for r in dl]), amean([r['dl1_wait_recovery'] for r in dl])
+        print(f"demand L1I misses: steady {s_:,.0f} lines (avg wait {ws / s_ if s_ else float('nan'):.0f} cyc, total {ws:,.0f})   "
+              f"recovery {r_:,.0f} lines (avg wait {wr / r_ if r_ else float('nan'):.0f} cyc, total {wr:,.0f})")
 
     # per-workload speedup vs a baseline directory (matched by simpoint name)
     if baseline:
@@ -305,6 +546,119 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
                 print("per-workload speedup (sorted):")
                 for name, ipc, b in sorted(pairs, key=lambda p: p[1] / p[2], reverse=True):
                     print(f"  {name:<40s} {100 * (ipc / b - 1):+7.2f}%   ipc {ipc:.4f}  base {b:.4f}")
+
+    # u-op-cache miss-cost profile (PROMETHEUS_MISS_PROFILE / _MISS_DUMP): windows ranked by the empty-ROB
+    # cycles charged to their misses, and how much of that the stall segmenter's traces contain
+    have_mp = [r for r in rows if r.get('mp')]
+    if have_mp:
+        w, ms, c, o = (amean([r['mp'][i] for r in have_mp]) for i in range(4))
+        print(f"\n--- u-op-cache miss-cost profile ---")
+        print(f"missing windows:   {w:,.0f}   misses {ms:,.0f}   empty-ROB cycles charged to a miss {c:,.0f}   (other empty-ROB cycles {o:,.0f})")
+        tops = [r['mp_top'] for r in have_mp if r.get('mp_top')]
+        if tops:
+            v = [amean([x[i] for x in tops]) for i in range(8)]
+            print(f"cost held by the costliest      1K {v[0]:.1f}%  2K {v[1]:.1f}%  4K {v[2]:.1f}%  8K {v[3]:.1f}%   windows")
+            print(f"cost held by the most-missing   1K {v[4]:.1f}%  2K {v[5]:.1f}%  4K {v[6]:.1f}%  8K {v[7]:.1f}%   windows")
+        trs = [r['mp_tr'] for r in have_mp if r.get('mp_tr')]
+        if trs:
+            v = [amean([x[i] for x in trs]) for i in range(5)]
+            print(f"in segmenter traces: all cost {v[0]:.1f}%   of the costliest 1K {v[1]:.1f}%  2K {v[2]:.1f}%  4K {v[3]:.1f}%  8K {v[4]:.1f}%")
+    have_or = [r for r in rows if r.get('uop_oracle')]
+    if have_or:
+        have_to = [r for r in have_or if r.get('trace_oracle')]
+        how = "filled on demand, taking u-op-cache capacity" if have_or[0].get('oracle_install') else "hit outside the u-op cache"
+        if have_to:
+            # trace oracle: every window of the N costliest segmenter traces always hits
+            print(f"trace oracle:      {amean([r['trace_oracle'] for r in have_to]):,.0f} traces "
+                  f"({amean([r['uop_oracle'] for r in have_to]):,.0f} windows) always hit ({how})")
+        else:
+            print(f"u-op-cache oracle: {amean([r['uop_oracle'] for r in have_or]):,.0f} windows always hit ({how})")
+
+    have_fu = [r for r in rows if r.get('fup_walks')]
+    if have_fu:
+        print(f"u-op FDIP:         {amean([r['fup_walks'] for r in have_fu]):,.0f} single-window walks launched at the cursor")
+    have_kb = [r for r in rows if r.get('sucp_kb')]
+    if have_kb:
+        print(f"SUCP storage (est.): {amean([r['sucp_kb'] for r in have_kb]):.1f} KB")
+    have_tax = [r for r in rows if r.get('tax')]
+    if have_tax:
+        # u-op-miss starve cycles (ROB empty), summed over workloads, by first touch and by the level that served the bytes
+        tot = [sum(r['tax'][i] for r in have_tax) for i in range(22)]
+        S = max(sum(tot), 1)
+        cyc = sum(r['cycles'] for r in have_tax)
+        seen = [tot[i] + tot[10 + i] for i in range(5)]
+        first = sum(tot[5:10]) + sum(tot[15:20])
+        rec = sum(tot[10:20])
+        print(f"stall taxonomy:    u-op-miss empty-ROB cycles {100 * S / max(cyc, 1):.1f}% of all cycles  (recovery {100 * rec / S:.0f}% of them)")
+        print(f"  code seen before: L1I {100 * seen[0] / S:.1f}%  L2 {100 * seen[1] / S:.1f}%  LLC {100 * seen[2] / S:.1f}%  DRAM {100 * seen[3] / S:.1f}%   "
+              f"| first-touch {100 * first / S:.1f}% | redirect bubble {100 * tot[20] / S:.1f}%  u-op hit in flight {100 * tot[21] / S:.1f}%")
+    have_l2i = [r for r in rows if r.get('l2i')]
+    if have_l2i:
+        v = [amean([r['l2i'][i] for r in have_l2i]) for i in range(5)]
+        print(f"L2 instruction:    perfect-hits {v[0]:,.0f}   EMISSARY mark events {v[1]:,.0f}  L2 lines marked {v[2]:,.0f}  evictions diverted {v[3]:,.0f}  high-priority evicted {v[4]:,.0f}")
+    have_rp = [r for r in rows if r.get('rp')]
+    if have_rp:
+        v = [amean([r['rp'][i] for r in have_rp]) for i in range(5)]
+        kb = [r['rp_kb'] for r in have_rp if r.get('rp_kb')]
+        print(f"resteer prefetch:  lookups {v[0]:,.0f}  trigger hits {v[1]:,.0f} ({pct(v[1], v[0]):.1f}%)  L1I prefetches {v[2]:,.0f}  dropped {v[3]:,.0f}  "
+              f"filed {v[4]:,.0f}" + (f"  table {amean(kb):.1f} KB" if kb else ''))
+    have_fd = [r for r in rows if r.get('fdip')]
+    if have_fd:
+        print(f"FDIP (cursor):     L1I line prefetches issued {amean([r['fdip'][0] for r in have_fd]):,.0f}   "
+              f"dropped (prefetch queue full) {amean([r['fdip'][1] for r in have_fd]):,.0f}   wrong-path {amean([r['fdip'][2] for r in have_fd]):,.0f}")
+
+    # trace_trigger_diag: why stored traces did not serve their misses (cost-weighted)
+    have_td = [r for r in rows if r.get('td_arr')]
+    if have_td:
+        print("\n--- trigger diagnostic: why stored traces did not serve ---")
+        pr = [amean([r['td_probes'][i] for r in have_td]) for i in range(5)]
+        print(f"cursor probes at stored entries: launched {pr[4]:,.0f}   already walking {pr[3]:,.0f}   "
+              f"resident (no walk) {pr[0]:,.0f}   dropped: walk cap {pr[2]:,.0f} / confidence {pr[1]:,.0f}")
+        ncls = min(len(r['td_miss']) for r in have_td)
+        arr = [amean([r['td_arr'][i] for r in have_td]) for i in range(3)]
+        am = [amean([r['td_arr_miss'][i] for r in have_td]) for i in range(ncls)]
+        miss_arr = sum(am)
+        print(f"demand at a stored entry: {arr[0]:,.0f}   already resident {pct(arr[1], arr[0]):.1f}%   "
+              f"served by the walk {pct(arr[2], arr[0]):.1f}%   missed {pct(miss_arr, arr[0]):.1f}%")
+        print("  missed because:   " + "  ".join(f"{TD_LABELS[i]} {pct(am[i], miss_arr):.1f}%" for i in range(1, ncls) if am[i] > 0))
+        ls_ = [amean([r['td_lead_served'][i] for r in have_td]) for i in range(6)]
+        lm_ = [amean([r['td_lead_missed'][i] for r in have_td]) for i in range(6)]
+        lb = ['<=8', '<=16', '<=32', '<=64', '<=128', '>128']
+        print("  probe->demand lead, walked entries served: " + "  ".join(f"{l}={pct(v, sum(ls_)):.0f}%" for l, v in zip(lb, ls_))
+              + f"   [{sum(ls_):,.0f}]")
+        print("  probe->demand lead, walked entries missed: " + "  ".join(f"{l}={pct(v, sum(lm_)):.0f}%" for l, v in zip(lb, lm_))
+              + f"   [{sum(lm_):,.0f}]")
+        hs = [r for r in have_td if r.get('td_stage')]
+        if hs:
+            st_ = [amean([r['td_stage'][i] for r in hs]) for i in range(4)]
+            unused = st_[2] + st_[3]
+            print(f"staged windows:    {st_[0]:,.0f}   staged after demand had already missed them (late) {pct(st_[1], st_[0]):.1f}%   "
+                  f"evicted unused {pct(unused, st_[0]):.1f}% = late {pct(st_[2], st_[0]):.1f}% + on time but never demanded {pct(st_[3], st_[0]):.1f}%")
+        hp = [r for r in have_td if r.get('td_pos')]
+        if hp:
+            pv = [amean([r['td_pos'][i] for r in hp]) for i in range(10)]
+            print("  used share by position in the walk: " + "  ".join(f"{l}={pct(pv[i], pv[i] + pv[5 + i]):.0f}% of {pv[i] + pv[5 + i]:,.0f}"
+                                                                  for i, l in enumerate(['1st', '2nd', '3rd', '4th', '5th+'])))
+        # cost views: charged to the class of the miss dispatch waits for, or of the FIRST miss of its miss run
+        for key, lbl in (('td_miss', 'u-op-cache misses'), ('td_tight', 'empty-ROB cyc, waited-for miss'),
+                         ('td_head_tight', 'empty-ROB cyc, run-head miss'), ('td_upper', 'starve cyc, waited-for miss'),
+                         ('td_head_upper', 'starve cyc, run-head miss')):
+            hk = [r for r in have_td if r.get(key)]
+            if not hk:
+                continue
+            v = [amean([r[key][i] for r in hk]) for i in range(len(hk[0][key]))]
+            tot = sum(v)
+            # classes that never occur are left out (e.g. 'uncovered' once the window history splits it)
+            parts = [f"{TD_LABELS[i]} {pct(v[i], tot):.1f}%" for i in range(ncls) if v[i] > 0]
+            if len(v) > ncls:
+                parts.append(f"hit/other {pct(v[ncls], tot):.1f}%")
+            print(f"{lbl + ':':32s}" + "  ".join(parts) + f"   [{tot:,.0f}]")
+        hr = [r for r in have_td if r.get('td_rec')]
+        if hr:
+            mi = [amean([r['td_miss'][i] for r in hr]) for i in range(ncls)]
+            rc = [amean([r['td_rec'][i] for r in hr]) for i in range(ncls)]
+            print(f"{'share in recovery (per cause):':32s}" + "  ".join(f"{TD_LABELS[i]} {pct(rc[i], mi[i]):.0f}%" for i in range(1, ncls) if mi[i] > 0)
+                  + f"   [all misses {pct(sum(rc), sum(mi)):.0f}%]")
 
     # UCP artifact runs: their prefetch/H2P counters (parsed from their output format)
     have_ucp = [r for r in rows if r.get('is_ucp')]
@@ -384,6 +738,51 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
             md_den = [r for r in md if r.get('ti_total')]
             md_pct = amean([pct(r['stall_marks_dropped'], r['ti_total']) for r in md_den]) if md_den else float('nan')
             print(f"marks dropped:     {md_abs:,.0f} tight-stall cycles with no open stretch ({md_pct:.1f}% of tight cycles)")
+        ras = [r for r in have_stall if r.get('stall_lost_recap') is not None]
+        if ras:
+            lr = amean([r['stall_lost_recap'] for r in ras])
+            rd = amean([r['stall_readmits'] for r in ras])
+            dd = amean([r['stall_dedup'] for r in ras])
+            print(f"evicted re-captures: {lr:,.0f} costly re-captures of evicted traces ({pct(lr, dd):.1f}% of re-captures)   re-admitted {rd:,.0f}")
+        rns = [r for r in have_stall if r.get('run_jump') or r.get('run_full')]
+        if rns:
+            # trace_run_format: traces are sequential-window runs, cut at jumps
+            print(f"run format:        cut at a jump {amean([r['run_jump'] for r in rns]):,.0f}   at the window limit {amean([r['run_full'] for r in rns]):,.0f}   "
+                  f"inherited costly {amean([r['run_inh'] for r in rns]):,.0f}   continuation traces stored {amean([r['run_stored'] for r in rns]):,.0f} "
+                  f"({pct(amean([r['run_stored'] for r in rns]), amean([r['stall_traces'] for r in rns])):.1f}% of stored traces)")
+        sps = [r for r in have_stall if r.get('split_cont') and not r.get('run_jump')]
+        if sps:
+            # trace_stall_split: miss runs past the depth continue as chained segments
+            print(f"split segments:    {amean([r['split_cont'] for r in sps]):,.0f} continuations   "
+                  f"{amean([r['split_inh'] for r in sps]):,.0f} inherited the run's costly verdict   "
+                  f"stored {amean([r['split_stored'] for r in sps]):,.0f} traces "
+                  f"({pct(amean([r['split_stored'] for r in sps]), amean([r['stall_traces'] for r in sps])):.1f}% of stored traces)")
+        mos = [r for r in have_stall if r.get('stall_mp_opened')]
+        if mos:
+            # trace_stall_mispredict_open: stretches opened at mispredicted branches (recorded correct path)
+            print(f"mispredict-opened: {amean([r['stall_mp_opened'] for r in mos]):,.0f} stretches   "
+                  f"stored {amean([r['stall_mp_traces'] for r in mos]):,.0f} traces "
+                  f"({pct(amean([r['stall_mp_traces'] for r in mos]), amean([r['stall_traces'] for r in mos])):.1f}% of stored traces)")
+        lds = [r for r in have_stall if r.get('stall_lead_keyed')]
+        if lds:
+            # trace_stall_trigger_lead: stretches stored under the pc checked L cycles before them
+            lk, ls = amean([r['stall_lead_keyed'] for r in lds]), amean([r['stall_lead_self'] for r in lds])
+            lt = amean([r['stall_lead_traces'] for r in lds])
+            dist = [amean([r['stall_lead_dist'][i] for r in lds]) for i in range(4)]
+            print(f"lead-keyed: {lk:,.0f} stretches ({pct(lk, lk + ls):.1f}% had a key that old)   stored {lt:,.0f} traces "
+                  f"({pct(lt, amean([r['stall_traces'] for r in lds])):.1f}% of stored)   "
+                  f"conflicts {amean([r['stall_lead_conflicts'] for r in lds]):,.0f} re-captures   "
+                  f"key-to-entry <=4K/64K/1M/far: {' / '.join(f'{pct(x, sum(dist)):.0f}%' for x in dist)}")
+        svs = [r['stall_starve_offset'] for r in have_stall if r.get('stall_starve_offset') is not None]
+        if svs:
+            so = [amean([x[i] for x in svs]) for i in range(9)]
+            stot = sum(so)
+            if stot > 0:
+                # where in a costly stretch dispatch first starves: win0 = the entry window; before = an
+                # earlier stretch's instructions starved dispatch; after = the closing hit or later
+                lbls = ['win0', 'win1', 'win2', 'win3', 'win4-7', 'win8+', 'past-depth', 'before', 'after']
+                print("first starve at:   " + "  ".join(f"{l}={100 * v / stot:.1f}%" for l, v in zip(lbls, so))
+                      + f"   [{stot:,.0f} costly stretches]")
         print(f"stored u-ops:      {amean([r['stall_stored_uops'] for r in have_stall]):,.0f}")
         have_store = [r for r in have_stall if 'store_evict' in r]
         if have_store:
@@ -396,6 +795,12 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
                 ovp = amean([pct(r['store_shared'], r['store_win']) for r in have_ov if r['store_win']])
                 print(f"fragmentation:     windows inserted {amean([r['store_win'] for r in have_ov]):,.0f}   "
                       f"already in another trace {amean([r['store_shared'] for r in have_ov]):,.0f} ({ovp:.1f}% overlap)")
+        tgs = [r for r in have_stall if r.get('store_alias_hits')]
+        if tgs:
+            lk = amean([r['store_lookups'] for r in tgs])
+            ah = amean([r['store_alias_hits'] for r in tgs])
+            ao = amean([r['store_alias_over'] for r in tgs])
+            print(f"partial tags:      alias hits {ah:,.0f} of {lk:,.0f} probes ({100 * ah / lk:.4f}%)   alias overwrites {ao:,.0f}")
         have_mc = [r for r in have_stall if 'mc_midtrace' in r and r.get('miss_total')]
         if have_mc:
             infl = amean([pct(r['mc_inflight'], r['miss_total']) for r in have_mc])
@@ -448,6 +853,9 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
             tot = amean([r['stall_cost_total'] for r in have_stall if r.get('stall_cost_total') is not None])
             print("top-N traces, ranked by ROB-STALL COST:")
             print(f"  cum% stall-cyc:  " + _row2(cost_avg, '%') + (f"   (avg total {tot:,.0f} cycles)" if not math.isnan(tot) else ""))
+            cbs = [r['cost_big'] for r in have_stall if r.get('cost_big')]
+            if cbs:
+                print("  cum% stall-cyc:  " + "  ".join(f"{n}={amean([x[i] for x in cbs]):.1f}%" for i, n in enumerate([2048, 4096, 8192])))
             if costw_avg:
                 print("  cum% dyn-weight: " + _row2(costw_avg, '%'))
             if ko:
@@ -490,6 +898,28 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
             print(f"chain: buffer hits {amean([r['chain_hits'] for r in have_chain]):,.0f}   "
                   f"evicted-unused {amean([r['chain_evict'] for r in have_chain]):,.0f}   "
                   f"unencodable {amean([r['chain_unenc'] for r in have_chain]):,.0f}   truncated {amean([r['chain_trunc'] for r in have_chain]):,.0f}")
+            mode = have_chain[0].get('buffer_promote', 1)
+            if mode != 1:
+                rh = [r['chain_buf_rehits'] for r in have_chain if r.get('chain_buf_rehits') is not None]
+                desc = {0: "no u-op-cache fill, buffer serves repeats", 2: "fill at LRU"}[mode]
+                line = f"buffer promote:    mode {mode} ({desc})"
+                if mode == 0 and rh:
+                    line += f"   re-hits {amean(rh):,.0f} of {amean([r['chain_hits'] for r in have_chain]):,.0f} buffer hits"
+                print(line)
+            shs = [r for r in have_chain if r.get('shadow_walks') is not None]
+            if shs:
+                # deep probe past a mispredicted branch: the supply there is the correct path a real FTQ
+                # would not hold yet.  Squash 0 = legacy (flagged; their buffer hits are oracle benefit),
+                # 1 = squashed at the misprediction (lines already fetched stay in the L1I)
+                sq = shs[0].get('probe_squash', 0)
+                w_ = amean([r['shadow_walks'] for r in shs])
+                verb = "squashed" if sq == 1 else "flagged"
+                line = (f"past-mispredict:   {w_:,.0f} walks {verb} ({pct(w_, amean([r['alt_triggers'] for r in shs])):.1f}% of walks)   "
+                        f"lines {amean([r['shadow_lines'] for r in shs]):,.0f}   staged windows {amean([r['shadow_windows'] for r in shs]):,.0f}")
+                if sq == 0:
+                    sh_h = amean([r['shadow_hits'] for r in shs])
+                    line += f"   buffer hits {sh_h:,.0f} ({pct(sh_h, amean([r['chain_hits'] for r in shs])):.1f}% of buffer hits = oracle)"
+                print(line)
             filt = [r['chain_filtered'] for r in have_chain if r.get('chain_filtered') is not None]
             if filt and amean(filt) > 0:
                 print(f"chain filtered:    {amean(filt):,.0f} windows already resident (not staged)")
@@ -509,10 +939,178 @@ def aggregate(path, pattern, include, baseline=None, scatter=False):
                 dist = "  ".join(f"{lbl}={100 * v / tot:.0f}%" for lbl, v in zip(['<=256', '<=1K', '<=4K', '<=16K', '>16K'], ages)) if tot else "-"
                 print(f"evicted->missed:   {n_etm:,.0f} demand misses on windows the buffer evicted unused "
                       f"({share:.1f}% of evicted-unused); eviction->miss age: {dist}")
+            dls = [r['chain_deltas'] for r in have_chain if r.get('chain_deltas') is not None]
+            if dls:
+                mix = [amean([x[i] for x in dls]) for i in range(4)]
+                tot = sum(mix)
+                if tot > 0:
+                    # packed-manifest record costs from the run's own format (kind + delta widths)
+                    r0 = have_chain[0]
+                    kb, sb, lb = r0.get('fmt_kind', 2), r0.get('fmt_short', 8), r0.get('fmt_long', 16)
+                    if not r0.get('fmt_meta_bits'):
+                        kb, sb, lb = 2, 8, 16  # legacy run: price as the default packed format
+                    avg_bits = (kb * mix[0] + (kb + sb) * mix[1] + (kb + lb) * mix[2]) / max(1e-9, mix[0] + mix[1] + mix[2])
+                    ftr = [r['chain_far_truncated'] for r in have_chain if r.get('chain_far_truncated') is not None]
+                    far_note = f"truncated at, prefix kept: {amean(ftr):,.0f} traces" if ftr and amean(ftr) > 0 else "rejected"
+                    print(f"delta mix:         seq {100 * mix[0] / tot:.0f}%  short {100 * mix[1] / tot:.0f}%  long {100 * mix[2] / tot:.0f}%  "
+                          f"far {100 * mix[3] / tot:.1f}% ({far_note})   -> packed avg {avg_bits:.1f} bits/transfer "
+                          f"(kind {kb}b, short {sb}b, " + (f"long {lb}b" if kb == 2 and lb > 0 else "no long class") + ") vs 16 flat")
+            tks = [r['chain_trace_kinds'] for r in have_chain if r.get('chain_trace_kinds') is not None]
+            if tks:
+                kinds = [amean([x[i] for x in tks]) for i in range(4)]
+                ktot = sum(kinds)
+                if ktot > 0:
+                    print(f"trace kinds:       single-window {100 * kinds[0] / ktot:.0f}%  sequential-only {100 * kinds[1] / ktot:.0f}%  "
+                          f"with short jump {100 * kinds[2] / ktot:.0f}%  with long jump {100 * kinds[3] / ktot:.0f}%   [of stored manifests]")
+            nds = [r for r in have_chain if r.get('chain_need_bits') is not None]
+            if nds:
+                nb = [amean([r['chain_need_bits'][i] for r in nds]) for i in range(6)]
+                nw = [amean([r['chain_need_windows'][i] for r in nds]) for i in range(5)]
+                tb, tw = sum(nb), sum(nw)
+                if tb > 0:
+                    # cumulative: share of captured stretches that a slot field of N bits stores WHOLE
+                    cum = 0.0
+                    parts = []
+                    for lbl, v in zip(['16', '24', '32', '48', '64'], nb[:5]):
+                        cum += v
+                        parts.append(f"{lbl}b={100 * cum / tb:.0f}%")
+                    print("stored whole by field width (cum):  " + "  ".join(parts) + f"  >64b={100 * nb[5] / tb:.0f}%")
+                if tw > 0:
+                    cum = 0.0
+                    parts = []
+                    for lbl, v in zip(['<=2', '<=3', '<=4', '<=6'], nw[:4]):
+                        cum += v
+                        parts.append(f"{lbl}={100 * cum / tw:.0f}%")
+                    print("stretch windows (cum, depth-capped): " + "  ".join(parts) + f"  >6={100 * nw[4] / tw:.0f}%")
+                tw_lost = amean([r['chain_trunc_windows'] for r in nds])
+                trunc_n = amean([r['chain_trunc'] for r in nds])
+                if trunc_n > 0:
+                    print(f"truncation loss:   {tw_lost:,.0f} windows dropped from {trunc_n:,.0f} truncated traces ({tw_lost / trunc_n:.1f} per truncated trace)")
+            rcs = [r for r in have_chain if r.get('chain_reach_trace') is not None]
+            if rcs:
+                rt = [amean([r['chain_reach_trace'][i] for r in rcs]) for i in range(7)]
+                rx = [amean([r['chain_reach_xfer'][i] for r in rcs]) for i in range(6)]
+                ttot, xtot = sum(rt), sum(rx)
+                if ttot > 0:
+                    # cumulative share of captured stretches kept WHOLE if the widest delta were N
+                    # (rt[0] = no taken transfer at all, always kept)
+                    cum = rt[0]
+                    parts = []
+                    for lbl, v in zip(['4KB(8b)', '128KB(13b)', '256KB(14b)', '512KB(15b)', '1MB(16b)'], rt[1:6]):
+                        cum += v
+                        parts.append(f"{lbl}={100 * cum / ttot:.1f}%")
+                    print("kept by max delta reach (cum):  " + "  ".join(parts) + f"   [{100 * rt[0] / ttot:.0f}% have no jump; {100 * rt[6] / ttot:.1f}% beyond 1MB]")
+                if xtot > 0:
+                    print("taken transfers by |delta|:     " + "  ".join(f"{lbl}={100 * v / xtot:.1f}%" for lbl, v in
+                                                                      zip(['<=4KB', '<=128KB', '<=256KB', '<=512KB', '<=1MB', '>1MB'], rx)))
+            dbs = [r['chain_delta_bits'] for r in have_chain if r.get('chain_delta_bits') is not None]
+            if dbs:
+                hb = [amean([x[i] for x in dbs]) for i in range(15)]  # hb[k] = transfers needing (k+3) bits (k=0: <=3, k=14: >16)
+                tot = sum(hb)
+                if tot > 0:
+                    # within +-4KB (<= 8 signed bits): distribution by exact width (32B windows: n bits = +-2^(n+4) B)
+                    short_tot = sum(hb[:6])
+                    if short_tot > 0:
+                        cum, parts = 0.0, []
+                        for k, lbl in enumerate(['3b/128B', '4b/256B', '5b/512B', '6b/1KB', '7b/2KB', '8b/4KB']):
+                            cum += hb[k]
+                            parts.append(f"{lbl}={100 * cum / short_tot:.0f}%")
+                        print(f"jumps <=4KB by bits (cum):   " + "  ".join(parts) + f"   [{100 * short_tot / tot:.0f}% of taken jumps]")
+                    cum, parts = 0.0, []
+                    for n in range(3, 17):
+                        cum += hb[n - 3]
+                        if n in (6, 8, 10, 12, 13, 14, 15, 16):
+                            parts.append(f"{n}b={100 * cum / tot:.1f}%")
+                    print(f"all taken jumps by bits (cum): " + "  ".join(parts) + f"   >16b={100 * hb[14] / tot:.1f}%")
             sl = [amean([r['chain_slack'][i] for r in have_chain]) for i in range(6)]
             tot = sum(sl)
             if tot > 0:
                 print("chain slack (probe->demand):  " + "  ".join(f"{lbl}={100*v/tot:.0f}%" for lbl, v in zip(['<=4', '<=8', '<=16', '<=32', '<=64', '>64'], sl)))
+
+    # trace_wrong_path: 1 = cursor stops at mispredicts, 2 = + synthetic wrong path holding
+    # BTB banks / decoders, 3 = + SUCP/UCP prefetching from the wrong path (flushed at resolution)
+    have_wp = [r for r in rows if r.get('wp_addresses') is not None and r.get('wrong_path', 0) >= 1]
+    if have_wp:
+        lvl = have_wp[0].get('wrong_path_name', have_wp[0]['wrong_path'])
+        print(f"\n--- wrong path (trace_wrong_path {lvl}) ---")
+        m = {k: amean([r[k] for r in have_wp]) for k in WP_KEYS}
+        if m['wp_cursor_stops'] > 0:
+            print(f"cursor stops:      {m['wp_cursor_stops']:,.0f} mispredictions seen at the cursor (no probing past them)")
+        if m['wp_shadows'] > 0:
+            cyc = [pct(r['wp_decoder_busy'], r['cycles']) for r in have_wp if r.get('cycles')]
+            print(f"wrong paths:       {m['wp_shadows']:,.0f}   addresses {m['wp_addresses']:,.0f}   fetched {m['wp_fetched']:,.0f} "
+                  f"({pct(m['wp_uop_misses'], m['wp_fetched']):.1f}% u-op-cache misses)")
+            print(f"decoders held:     {m['wp_decoder_busy']:,.0f} cycles ({pct(m['wp_decoder_busy'], m['wp_fetch_cycles']):.1f}% of wrong-path cycles, "
+                  f"{amean(cyc) if cyc else float('nan'):.2f}% of runtime) -- walks could not pre-decode")
+        if m['wp_l1i_lines'] > 0:
+            # level 3: wrong-path fetch requests lines, waits on them, and stops at a full backend
+            print(f"wrong-path fetch:  {m['wp_l1i_lines']:,.0f} L1I lines   {pct(m['wp_fetched'], m['wp_shadows']) / 100:,.0f} instrs per wrong path   "
+                  f"waiting on a line {pct(m['wp_line_stalls'], m['wp_fetch_cycles']):.1f}% / backend full {pct(m['wp_full'], m['wp_fetch_cycles']):.1f}% of wrong-path cycles")
+        if m['wp_stops'] > 0 or m['wp_uop_fills'] > 0:
+            # ucp2: exact wrong path -- how often it ran into code the trace never executed
+            print(f"exact wrong path:  {pct(m['wp_stops'], m['wp_shadows']):.1f}% of wrong paths ended at unseen code / unknown target   "
+                  f"u-op-cache fills {m['wp_uop_fills']:,.0f} (wrong-path pollution)")
+        if m['wp_walks'] > 0 or m['wp_store_hits'] > 0 or m['wp_ucp_triggers'] > 0:
+            print(f"wrong-path walks:  {m['wp_walks']:,.0f} (store hits {m['wp_store_hits']:,.0f}, UCP H2P {m['wp_ucp_triggers']:,.0f})   "
+                  f"flushed {m['wp_flushed']:,.0f}   lines {m['wp_lines']:,.0f}   staged {m['wp_staged']:,.0f}   buffer hits {m['wp_buffer_hits']:,.0f}")
+
+    # trace_oracle_peek (diagnostic ceiling) and trace_peek_diag (next-trace predictability at mispredictions)
+    have_pk = [r for r in rows if r.get('peek_probes', 0) > 0]
+    if have_pk:
+        print(f"\n--- oracle peek (diagnostic ceiling) ---")
+        print(f"peek probes:       {amean([r['peek_probes'] for r in have_pk]):,.0f}   store hits {amean([r['peek_hits'] for r in have_pk]):,.0f}   "
+              f"(walk use: see past-mispredict row)")
+    have_rk = [r for r in rows if r.get('rk_probes', 0) > 0]
+    if have_rk:
+        kn = have_rk[0].get('rk_knob', (1, 0, 0))
+        m = {k: amean([r[k] for r in have_rk]) for k in ('rk_mp', 'rk_filed', 'rk_probes', 'rk_hits', 'rk_walks', 'rk_bhits')}
+        print(f"\n--- recovery key (ghr {kn[1]} bits, h2p gate {kn[2]}) ---")
+        print(f"filed:             {m['rk_filed']:,.0f} of {m['rk_mp']:,.0f} mispredictions ({pct(m['rk_filed'], m['rk_mp']):.1f}%) had a stored trace after them")
+        print(f"probes:            {m['rk_probes']:,.0f}   hits {m['rk_hits']:,.0f}   walks launched {m['rk_walks']:,.0f}   "
+              f"buffer hits {m['rk_bhits']:,.0f} ({m['rk_bhits'] / m['rk_walks'] if m['rk_walks'] else float('nan'):.2f} per walk)")
+    have_cf = [r for r in rows if r.get('chf') is not None and r['chf'][1] > 0]
+    if have_cf:
+        kn = have_cf[0].get('chain_knob', (0, 0))
+        v = [amean([r['chf'][i] for r in have_cf]) for i in range(11)]
+        print(f"\n--- trace chaining (depth {kn[0]}, window {kn[1] if kn[1] else 'any'}) ---")
+        print(f"successor links:   {v[0]:,.0f} written   hops {v[1]:,.0f}   successor stored {v[2]:,.0f} ({pct(v[2], v[1]):.1f}%)")
+        print(f"walks by hop:      " + "  ".join(f"{h}: {v[3 + i]:,.0f}" for i, h in enumerate(['1', '2', '3', '4+'])))
+        print(f"buffer hits by hop:" + "  ".join(f" {h}: {v[7 + i]:,.0f}" for i, h in enumerate(['1', '2', '3', '4+'])))
+    have_sc = [r for r in rows if r.get('succ_st') is not None and sum(r['succ_st'][:4]) + sum(r.get('succ_mp', [0] * 9)[:4]) > 0]
+    if have_sc:
+        print("\n--- trace succession: consecutive costly stretches A -> B ---")
+        for key, lbl in (('succ_st', 'steady'), ('succ_mp', 'after a mispredict')):
+            v = [amean([r[key][i] for r in have_sc if r.get(key)]) for i in range(9)]
+            na, ng = sum(v[:4]), sum(v[4:])
+            if na > 0:
+                print(f"{lbl:19s} {na:>10,.0f} pairs   B starts at A's next instr {pct(v[0], na):.1f}%  near (<=256B) {pct(v[1], na):.1f}%  "
+                      f"same 4KB {pct(v[2], na):.1f}%  jump {pct(v[3], na):.1f}%   |  gap 0 {pct(v[4], ng):.1f}%  1-8 {pct(v[5], ng):.1f}%  "
+                      f"9-64 {pct(v[6], ng):.1f}%  65-256 {pct(v[7], ng):.1f}%  >256 {pct(v[8], ng):.1f}% instrs")
+    have_vp = [r for r in rows if r.get('vp_lookups', 0) > 0]
+    if have_vp:
+        kn = have_vp[0].get('vp_knob', (1, 0, 0, 0, 0.0))
+        m = {k: amean([r[k] for r in have_vp]) for k in VP_KEYS + VPT_KEYS}
+        print(f"\n--- trace value predictor ({kn[1]} tables x {kn[2]} entries, history up to {kn[3]} bits, {kn[4]:.1f} KB) ---")
+        print(f"predictions:       {m['vp_lookups']:,.0f}   matched {m['vp_matches']:,.0f} ({pct(m['vp_matches'], m['vp_lookups']):.1f}%)   "
+              f"fired {m['vp_fires']:,.0f}   trace in store {m['vp_store_hits']:,.0f}   walks launched {m['vp_walks']:,.0f} "
+              f"({m['vp_walks_mp']:,.0f} at a misprediction)")
+        print(f"buffer hits:       {m['vp_bhits']:,.0f} ({m['vp_bhits_mp']:,.0f} from walks fired at a misprediction)")
+        print(f"training:          {m['vp_train']:,.0f} costly stretches ({m['vp_train_mp']:,.0f} after a misprediction)   "
+              f"correct {m['vp_correct']:,.0f} ({pct(m['vp_correct'], m['vp_train']):.1f}%; after a misprediction "
+              f"{pct(m['vp_correct_mp'], m['vp_train_mp']):.1f}%)   wrong {m['vp_wrong']:,.0f}   no prediction {m['vp_noprov']:,.0f}")
+        print(f"                   matched predictions with no costly stretch after {m['vp_none']:,.0f}   "
+              f"allocations {m['vp_allocs']:,.0f} (failed {m['vp_alloc_fail']:,.0f})")
+    have_pd = [r for r in rows if r.get('pdiag_mp', 0) > 0]
+    if have_pd:
+        mp, wt = amean([r['pdiag_mp'] for r in have_pd]), amean([r['pdiag_wt'] for r in have_pd])
+        print(f"\n--- next-trace predictability at mispredictions (trace_peek_diag) ---")
+        print(f"mispredictions:    {mp:,.0f}   followed by a stored trace {wt:,.0f} ({pct(wt, mp):.1f}%)")
+        print(f"  {'key':10s} {'fires':>12s} {'useful':>10s} {'wrong':>10s} {'coverage':>9s} {'accuracy':>9s}   [coverage = useful / followed-by-trace; accuracy = useful / fires]")
+        for k in have_pd[0]['pdiag_keys']:
+            f_ = amean([r['pdiag_keys'][k][0] for r in have_pd])
+            u_ = amean([r['pdiag_keys'][k][1] for r in have_pd])
+            w_ = amean([r['pdiag_keys'][k][2] for r in have_pd])
+            print(f"  {k:10s} {f_:12,.0f} {u_:10,.0f} {w_:10,.0f} {pct(u_, wt):8.1f}% {pct(u_, f_):8.1f}%")
 
     have_fe = [r for r in rows if 'ti_total' in r]
     if not have_fe:

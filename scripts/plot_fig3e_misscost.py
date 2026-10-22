@@ -56,7 +56,7 @@ for i, (suite, (rec_miss, rec_idle)) in enumerate(DATA.items()):
             ax.annotate(f"{rec:.0f}%", (x - W / 2 - 0.03, 100 - rec / 2),
                         ha="right", va="center", fontsize=6.4, color=INK_2ND)
         positions.append(x)
-        labels.append("µ-op\nmisses" if k == 0 else "backend\nidle")
+        labels.append("uop\nmisses" if k == 0 else "backend\nidle")
     ax.annotate(suite, (i, -34), ha="center", va="top", fontsize=7.5,
                 color=INK, annotation_clip=False)
 

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "prometheus_run.h"
 #include <algorithm>
 #include <fstream>
 #include <numeric>
@@ -90,6 +91,9 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
   app.add_option("traces", trace_names, "The paths to the traces")->required()->expected(NUM_CPUS)->check(CLI::ExistingFile);
 
   CLI11_PARSE(app, argc, argv);
+  if (!trace_names.empty()) {
+    prometheus::trace_name = trace_names.front();
+  }
 
   init_event_listeners(requested_listeners);
 
